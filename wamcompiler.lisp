@@ -1,12 +1,17 @@
 ;(defun main ()
 ;  (format t "hello,world~%"))
 ;
-;(sb-ext:save-lisp-and-die "plcompiler"
+;(sb-ext:save-lisp-and-die "wamcompiler"
 ;			  :toplevel #'main
 					;			  :executable t)
 
 (defvar *operator-list* nil)
 (defvar *ignore-comma* nil)
+
+
+(defmacro op-atom (x) `(car ,x))
+(defmacro op-prec (x) `(cadr ,x))
+(defmacro op-assoc (x) `(caddr ,x))
 
 (defmacro dostream (bind &body body)
   `(loop (let ((,(car bind) (read-char ,(cadr bind))))
@@ -19,17 +24,14 @@
   (let ((c (read-char s)))
     (unread-char c s)
     (cond ((null c) nil)
-	  ((eq c #\%) (skip-comment s) (get-token s))
+	  ((eq c #\%) (read-char s) (skip-comment s) (get-token s))
 	  ((eq c #\)) (read-char s) '(rparen))
 	  ((eq c #\() (read-char s) '(lparen))
 	  ((eq c #\,) (read-char s) (cons 'atom '|,|))
+	  ((eq c #\;) (read-char s) (cons 'atom '|;|))
 	  ((digit-char-p c) (cons 'int (read-int s)))
-	  ((eq c #\-) (read-char s)
-	   (cons 'int (- (read-int s))))
-	  ((upper-case-p c) (cons 'variable (read-alphanum-atom s)))
-	  ((or (alpha-char-p c) (eq #\_ c)) (cons 'atom (read-alphanum-atom s)))
 	  ((member c *non-alphanum-chars*) (read-non-alphanum-atom s))
-	  (t (cons 'atom (read-alphanum-atom s))))))
+	  (t (read-alphanum-atom s)))))
 
 (defun skip-whitespace (s)
   (dostream (c s)
@@ -56,7 +58,9 @@
 	      (if (not (or (alphanumericp c) (eq #\_ c)))
 		  (progn (unread-char c s) (return nil)))
 	      (setq acc (cons c acc)))
-    (intern (concatenate 'string (reverse acc)))))
+    (let ((str (concatenate 'string (reverse acc))))
+      (cond ((or (upper-case-p (char str 0)) (equal str "_")) (cons 'variable (intern str)))
+	    (t (cons 'atom (intern str)))))))
 
 (defun read-non-alphanum-atom (s)
   (let ((acc))
@@ -153,9 +157,6 @@
   (|**| 200 xfx)
   (^ 200 xfy)))
 
-(defmacro op-atom (x) `(car ,x))
-(defmacro op-prec (x) `(cadr ,x))
-(defmacro op-assoc (x) `(caddr ,x))
 
 (defun commap (x)
   (and (eq (car x) 'atom) (eq (cdr x) '|,|)))
@@ -184,7 +185,12 @@
 		 (labels ((scan (h)
 			    (if (and (not (null h)) (eq (op-prec (car h)) current-prec))
 				(scan (cdr h)) h)))
-		 (scan head))))
+		   (scan head))))
+	     (arrange (tree)
+	       (cond ((eq 'struct (car tree)) (cons (cadr tree) (mapcar #'arrange (cddr tree))))
+		     ((eq 'int (car tree)) (cdr tree))
+		     ((eq 'variable (car tree)) (cdr tree))
+		     (t (princ (car tree)) (error "Bad ast."))))
 	     (parse-arguments ()
 	       (let ((next (next-token)) (*ignore-comma* t))
 		 (if (eq (car next) 'lparen)
@@ -208,7 +214,7 @@
 			(let ((cdr-part (cdr next)))
 			  (if nil;(get cdr-part 'op)
 			      (error "Syntax error! (演算子の使い方が正しくありません)")
-			      `(struct ,cdr-part ,(parse-arguments)))))
+			      `(struct ,cdr-part ,@(parse-arguments)))))
 		       (t  next))))
 	     (parse-sub (head)
 	       (block exit
@@ -243,14 +249,14 @@
 				       (unget-token `(struct ,(op-atom op) ,operand-1))
 				       (return-from exit (parse-sub current-head)))
 				      ((eq (op-assoc op) 'xfy)
-				       (return-from exit `(struct ,(op-atom op) ,(list operand-1 (parse-sub current-head)))))
+				       (return-from exit `(struct ,(op-atom op) ,operand-1 ,(parse-sub current-head))))
 				      ((eq (op-assoc op) 'xfx)
-				       (return-from exit `(struct ,(op-atom op) ,(list operand-1 (parse-sub next-head)))))
+				       (return-from exit `(struct ,(op-atom op) ,operand-1 ,(parse-sub next-head))))
 				      ((eq (op-assoc op) 'yfx)
-				       (unget-token `(struct ,(op-atom op) ,(list operand-1 (parse-sub next-head))))
+				       (unget-token `(struct ,(op-atom op) ,operand-1 ,(parse-sub next-head)))
 				       (return-from exit (parse-sub current-head)))))
 				(t (unget-token gottok)))))
 		     (return-from exit operand-1))))))
-      (let ((result (parse-sub *operator-list*)))
+      (let ((result (arrange (parse-sub *operator-list*))))
 	(if (not (eq (car (next-token)) 'dot)) (error "Syntax error!") result)))))
      
