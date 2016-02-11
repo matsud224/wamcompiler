@@ -16,6 +16,7 @@
   `(loop (let ((,(car bind) (read-char ,(cadr bind))))
 	   (if (null ,(car bind)) (return nil)) ,@body)))
 
+
 (defvar *non-alphanum-chars* '(#\# #\$ #\& #\* #\+ #\- #\. #\/ #\: #\< #\= #\> #\? #\@ #\^ #\~ #\\))
 
 (defun get-token (s)
@@ -290,6 +291,9 @@ stack: -1,-3,-5,...
 heap: -2,-4,-6,...
 |#
 
+(defconstant *bottom-of-stack -1)
+(defconstant *bottom-of-heap -2)
+
 (deftype stack-address ()
   '(and (satisfies minusp) (satisfies oddp)))
 
@@ -337,6 +341,14 @@ heap: -2,-4,-6,...
   (declare (special register-area))
   (setf (aref register-area num) new-val))
 
+(defun trail (addr)
+  (declare (special trail-area))
+  (aref trail-area addr))	
+
+(defun (setf trail) (new-val addr)
+  (declare (special trail-area))
+  (setf (aref trail-area addr) new-val))
+
 (defun stackvar (y)
   (declare (special stack-area E))
   (aref stack-area (- (addr+ E y 1))))	
@@ -354,13 +366,66 @@ heap: -2,-4,-6,...
 	((and (typep addr1 heap-address) (typep addr1 stack-address)) t)
 	(t (> addr1 addr2))))
 
-(defun deref (addr)
-  (let ((val (value addr)))
-    (if (a))))
+(defun deref (a)
+  (destructuring-bind  (tag . value) (store addr)
+    (if (and (eq tag 'ref) (/= value a))
+	(deref value)
+	a)))
+
+(defun backtrack ()
+  (if (eq B *bottom-of-stack*)
+      (print "no.")
+      (progn (setf B0 (stack (addr+ B (stack B) 7)))
+	     (setf P (stack (addr+ B (stack B) 4))))))
+
+(defun bind (a1 a2)
+  (let ((t1 (car (store a1))) (t2 (car (store a2))))
+    (if (and (eq t1 'ref) (or (not (eq t2 'ref)) (addr< a2 a1)))
+	(progn (setf (store a1) (store a2))
+	       (trail a1))
+	(progn (setf (store a2) (store a1))
+	       (trail a2)))))
+
+(defun trail (a)
+  (if (or (addr< a HB) (and (addr< H a) (addr< a B)))
+      (progn (setf (trail TR) a)
+	     (incf TR))))
+
+(defun unwind-trail (a1 a2)
+  (loop for i from a1 to (1- a2) do
+       (setf (store (trail i)) (cons 'ref (trail i)))))
 
 (defun unify (a1 a2)
   (declare (special fail))
-  )
+  (let ((pdl nil))
+    (push a1 pdl) (push a2 pdl)
+    (setq fail nil)
+    (loop while (not (null pdl) fail) do
+	 (let ((d1 (deref (pop pdl))) (d2 (deref (pop pdl))))
+	   (if (/= d1 d2)
+	       (progn
+		 (destructuring-bind ((t1 v1) (t2 v2)) (list (store d1) (store d2))
+		   (if (eq t1 'ref)
+		       (bind d1 d2)
+		       (case t2
+			 (ref (bind d1 d2))
+			 (con (setq fail (or (not (eq t1 'con)) (not (eq v1 v2)))))
+			 (lis (if (not (eq t1 'lis))
+				  (setq fail t)
+				  (progn
+				    (push v1 pdl)
+				    (push v2 pdl)
+				    (push (addr+ v1 1) pdl)
+				    (push (addr+ v2 1) pdl))))
+			 (struct (if (not (eq t1 'struct))
+				     (setq fail t)
+				     (progn
+				       (destructuring-bind ((f1 n1) (f2 n2)) (list (store v1) (store v2))
+					 (if (or (not (eq f1 f2)) (/= n1 n2))
+					     (setq fail t)
+					     (loop for i from 1 to n1 do
+						  (push (addr+ v1 i) pdl)
+						  (push (addr+ v2 i) pdl))))))))))))))))
 
 (defun make-machine ()
   (let* ((register-area (make-array 10 :adjustable t)) (heap-area (make-array 30 :adjustable t))
@@ -706,10 +771,10 @@ heap: -2,-4,-6,...
 					      (if result
 						  (setf P (cdr result))
 						  (backtrack))))
-		       (neck-cut )
+		       (neck-cut (error "not implemented"))
 		       (get-level (let ((y (cadr inst)))
-				    ))
+				    (error "not implemented")))
 		       (cut (let ((y (cadr inst)))
-			      ))
-		       (otherwise (error "unknown instruction!"))
+			      (error "not implemented")))
+		       (otherwise (error "unknown instruction!")))))))))))
 		       
