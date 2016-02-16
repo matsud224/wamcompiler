@@ -314,32 +314,171 @@
 	   (assign-variables nil (flatten-comma (cadr expr))))
 	  (t
 	   (assign-variables expr nil)))))
-      
+
+(defun compile-test ()
+  (let ((expr (parse *standard-input*)))
+    (print-wamcode (compile-clause expr))))
+
+(defun print-wamcode (code)
+  (dolist (inst code)
+    (case (car inst)
+      (put-variable-temporary
+       (format t "put-variable X~A,A~A~%" (cadr inst) (caddr inst)))
+      (put-variable-permanent
+       (format t "put-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+      (put-value-temporary
+       (format t "put-value X~A,A~A~%" (cadr inst) (caddr inst)))
+      (put-value-permanent
+       (format t "put-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+      (put-unsafe-value
+       (format t "put-unsafe-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+      (put-structure
+       (format t "put-structure '~A'/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+      (put-list
+       (format t "put-list A~A~%" (cadr inst)))
+      (put-constant
+       (format t "put-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+      (set-variable-temporary
+       (format t "set-variable X~A~%" (cadr inst)))
+      (set-variable-permanent
+       (format t "set-variable Y~A~%" (cadr inst)))
+      (set-value-temporary
+       (format t "set-value X~A~%" (cadr inst)))
+      (set-value-permanent
+       (format t "set-value Y~A~%" (cadr inst)))
+      (set-local-value-temporary
+       (format t "set-local-value X~A~%" (cadr inst)))
+      (set-local-value-permanent
+       (format t "set-local-value Y~A~%" (cadr inst)))
+      (set-constant
+       (format t "set-constant ~A~%" (cadr inst)))
+      (set-void
+       (format t "set-void ~A~%" (cadr inst)))
+      (get-variable-temporary
+       (format t "get-variable X~A,A~A~%" (cadr inst) (caddr inst)))
+      (get-variable-permanent
+       (format t "get-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+      (get-value-temporary
+       (format t "get-value X~A,A~A~%" (cadr inst) (caddr inst)))
+      (get-value-permanent
+       (format t "get-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+      (get-structure
+       (format t "get-structure '~A'/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+      (get-list
+       (format t "get-list A~A~%" (cadr inst)))
+      (get-constant
+       (format t "get-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+      (unify-variable-temporary
+       (format t "unify-variable X~A~%" (cadr inst)))
+      (unify-variable-permanent
+       (format t "unify-variable Y~A~%" (cadr inst)))
+      (unify-value-temporary
+       (format t "unify-value X~A~%" (cadr inst)))
+      (unify-value-permanent
+       (format t "unify-value Y~A~%" (cadr inst)))
+      (unify-local-value-temporary
+       (format t "unify-local-value X~A~%" (cadr inst)))
+      (unify-local-value-permanent
+       (format t "unify-local-value Y~A~%" (cadr inst)))
+      (unify-constant
+       (format t "unify-constant ~A~%" (cadr inst)))
+      (unify-void
+       (format t "unify-void ~A~%" (cadr inst)))
+      (call
+       (format t "call ~A,~A~%" (cadr inst) (caddr inst)))
+      (execute
+       (format t "execute ~A~%" (cadr inst)))
+      (try-me-else
+       (format t "try-me-else ~A~%" (cadr inst)))
+      (retry-me-else
+       (format t "retry-me-else ~A~%" (cadr inst)))
+      (trust-me
+       (format t "trust-me ~A~%" (cadr inst)))
+      (try
+       (format t "try ~A~%" (cadr inst)))
+      (retry
+       (format t "retry ~A~%" (cadr inst)))
+      (trust
+       (format t "trust ~A~%" (cadr inst)))
+      (switch-on-term
+       (format t "switch-on-term ~A,~A,~A,~A~%" (cadr inst) (caddr inst) (cadddr inst) (car (cddddr inst))))
+      (switch-on-constant
+       (format t "switch-on-constant ~A~%" (cadr inst)))
+      (switch-on-structure
+       (format t "switch-on-structure ~A~%" (cadr inst)))
+      (get-level
+       (format t "get-level Y~A~%" (cadr inst)))
+      (cut
+       (format t "cut Y~A~%" (cadr inst)))
+      (t (error (format nil "Unknown instruction (~A)" (car inst)))))))
   
 (defun compile-clause (clause)
-  (let ((code nil))
-    (labels ((compile-struct-put (arg)
-	     (compile-head-argument (arg A)
-	       (cond ((variablep arg) (push `(get-variable-temporary ,(incf Y) ,A) code))
-		     ((termp arg) (push `(get-structure ,(cons (car arg) (arity arg)) A))
-		      (dolist (a (cdr arg))
-			(push (
-		      
-		      
-    (cond ((and (eq '|:-| (car clause) (= (arity clause) 2)))
-	   (let ((vartable (make-vartable (cadr clause) (caddr clause))))
-	     (append (compile-head (cadr clause) vartable)
-		     (compile-body (caddr clause) vartable))))
-	  ((eq '|:-| (car clause) (= (arity clause) 1))
-	   (let ((vartable (make-hash-table nil (cadr clause))))
-	     (compile-body (cadr clause) vartable)))
-	  ((eq '|?-| (car clause) (= (arity clause) 1))
-	   (let ((vartable (make-hash-table :test #'eq)))
-	     (compile-body (cadr clause) vartable)))
-	  ((consp clause) (compile-head clause))
-	  ((variablep clause) (print "42") nil)
-	  (t (error "Invalid clause."))))
-
+  (destructuring-bind (head . body) (cond ((and (eq (car clause) '|:-|) (= (arity clause) 2))
+					 (cons (cadr clause) (flatten-comma (caddr clause))))
+					((and (eq (car clause) '|:-|) (= (arity clause) 1))
+					 (cons nil (flatten-comma (cadr clause))))
+					((and (eq (car clause) '|?-|) (= (arity clause) 1))
+					 (cons nil (flatten-comma (cadr clause))))
+					(t
+					 (cons clause nil)))
+    (multiple-value-bind (assign-table register-next) (assign-variables head body)
+	(labels ((compile-head-term (term)
+		   (let ((A 0))
+		     (mapcan (lambda (arg)
+			       (incf A)
+			       (cond ((variablep arg)
+				      (let ((vardata (cdr (assoc arg assign-table))))
+					(list
+					 (case (car vardata)
+					   (temporary `(get-variable-temporary ,(cdr vardata) ,A))
+					   (permanent `(get-variable-permanent ,(cdr vardata) ,A))))))
+				     ((termp arg)
+				      `((get-structure ,(cons (car arg) (arity arg)) ,A)
+					,@(compile-head-struct-args (cdr arg))))))
+			     (cdr term))))
+		 (compile-head-struct-args (struct-args)
+		   (mapcan (lambda (arg)
+			     (cond ((variablep arg)
+				    (let ((vardata (cdr (assoc arg assign-table))))
+				      (list
+				       (case (car vardata)
+					 (temporary `(unify-variable-temporary ,(cdr vardata)))
+					 (permanent `(unify-variable-permanent ,(cdr vardata)))))))
+				   ((termp arg)
+				    (let ((tempvar (incf (first register-next))))
+				      `((unify-variable-temporary ,tempvar)
+					(get-structure ,(cons (car arg) (arity arg)) ,tempvar)
+					,@(compile-head-struct-args (cdr arg)))))))
+			     struct-args))
+		 (compile-body-term (term)
+		   (let ((A 0))
+		     (mapcan (lambda (arg)
+			       (incf A)
+			       (cond ((variablep arg)
+				      (let ((vardata (cdr (assoc arg assign-table))))
+					(list
+					 (case (car vardata)
+					   (temporary `(put-variable-temporary ,(cdr vardata) ,A))
+					   (permanent `(put-variable-permanent ,(cdr vardata) ,A))))))
+				     ((termp arg)
+				      `((put-structure ,(cons (car arg) (arity arg)) ,A)
+					,@(compile-body-struct-args (cdr arg))))))
+			     (cdr term))))
+		 (compile-body-struct-args (struct-args)
+		   (mapcan (lambda (arg)
+			     (cond ((variablep arg)
+				    (let ((vardata (cdr (assoc arg assign-table))))
+				      (list
+				       (case (car vardata)
+					 (temporary `(set-variable-temporary ,(cdr vardata)))
+					 (permanent `(set-variable-permanent ,(cdr vardata)))))))
+				   ((termp arg)
+				    (let ((tempvar (incf (first register-next))))
+				      `((put-structure ,(cons (car arg) (arity arg)) ,tempvar)
+					,@(compile-head-struct-args (cdr arg))
+					(set-value-temporary ,tempvar))))))
+			     struct-args)))
+	  (append (compile-head-term head) (mapcan #'compile-body-term body))))))
 
 
 
