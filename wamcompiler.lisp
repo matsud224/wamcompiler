@@ -302,8 +302,13 @@
 				       (first-appear (cadr v)) (last-appear (cddr v)))
 				   (if (= first-appear last-appear)
 				       (cons var (cons 'temporary (incf (nth first-appear arity-list))))
-				       (cons var (cons 'permanent (incf Y-counter)))))) sorted-tbl)))
-    (values assigned-tbl arity-list)))
+				       (cons var (cons 'permanent (incf Y-counter)))))) sorted-tbl))
+	 (remain-list (make-list (length body) :initial-element 0)))
+    (dolist (v sorted-tbl)
+      (loop for i from 0 to (1- (cddr v)) do
+	   (incf (nth i remain-list))))
+    (setf (car (last remain-list)) -1)
+    (values assigned-tbl arity-list remain-list)))
 	   
 
 (defun assign-test ()
@@ -333,7 +338,7 @@
       (put-unsafe-value
        (format t "put-unsafe-value Y~A,A~A~%" (cadr inst) (caddr inst)))
       (put-structure
-       (format t "put-structure '~A'/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+       (format t "put-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
       (put-list
        (format t "put-list A~A~%" (cadr inst)))
       (put-constant
@@ -363,7 +368,7 @@
       (get-value-permanent
        (format t "get-value Y~A,A~A~%" (cadr inst) (caddr inst)))
       (get-structure
-       (format t "get-structure '~A'/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+       (format t "get-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
       (get-list
        (format t "get-list A~A~%" (cadr inst)))
       (get-constant
@@ -384,10 +389,16 @@
        (format t "unify-constant ~A~%" (cadr inst)))
       (unify-void
        (format t "unify-void ~A~%" (cadr inst)))
+      (allocate
+       (format t "allocate~%"))
+      (deallocate
+       (format t "deallocate~%"))
       (call
-       (format t "call ~A,~A~%" (cadr inst) (caddr inst)))
+       (format t "call ~A/~A,~A~%" (caadr inst) (cdadr inst) (caddr inst)))
       (execute
-       (format t "execute ~A~%" (cadr inst)))
+       (format t "execute ~A/~A~%" (caadr inst) (cdadr inst)))
+      (proceed
+       (format t "proceed~%"))
       (try-me-else
        (format t "try-me-else ~A~%" (cadr inst)))
       (retry-me-else
@@ -411,7 +422,12 @@
       (cut
        (format t "cut Y~A~%" (cadr inst)))
       (t (error (format nil "Unknown instruction (~A)" (car inst)))))))
-  
+
+(defmacro cons-when (condition element list)
+  `(if ,condition
+       (cons ,element ,list)
+       ,list))
+
 (defun compile-clause (clause)
   (destructuring-bind (head . body) (cond ((and (eq (car clause) '|:-|) (= (arity clause) 2))
 					 (cons (cadr clause) (flatten-comma (caddr clause))))
@@ -421,7 +437,7 @@
 					 (cons nil (flatten-comma (cadr clause))))
 					(t
 					 (cons clause nil)))
-    (multiple-value-bind (assign-table register-next) (assign-variables head body)
+    (multiple-value-bind (assign-table register-next remain-list) (assign-variables head body)
 	(labels ((compile-head-term (term)
 		   (let ((A 0))
 		     (mapcan (lambda (arg)
@@ -477,9 +493,19 @@
 				      `((put-structure ,(cons (car arg) (arity arg)) ,tempvar)
 					,@(compile-head-struct-args (cdr arg))
 					(set-value-temporary ,tempvar))))))
-			     struct-args)))
-	  (append (compile-head-term head) (mapcan #'compile-body-term body))))))
-
+			   struct-args)))
+	  (let ((have-permanent (some #'plusp remain-list)))
+	    (cons-when have-permanent
+		       (list 'allocate) (append (compile-head-term head)
+						(mapcan (lambda (b remain)
+							  (append (compile-body-term b)
+								  (cons-when (and have-permanent (= -1 remain))
+									     (list 'deallocate)
+									     (list
+									      (if (= -1 remain)
+										  `(execute ,(cons (car b) (arity b)))
+										  `(call ,(cons (car b) (arity b)) ,remain))))))
+							body remain-list))))))))
 
 
 #|

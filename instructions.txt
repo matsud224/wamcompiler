@@ -29,8 +29,11 @@ unify-local-value-temporary x
 unify-local-value-permanent y
 unify-constant c
 unify-void n
+allocate
+deallocate
 call p,n
 execute p
+proceed
 try-me-else l
 retry-me-else l
 trust-me n
