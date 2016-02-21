@@ -26,6 +26,9 @@
 	  ((eq c #\%) (skip-comment s) (get-token s))
 	  ((eq c #\)) '(rparen))
 	  ((eq c #\() '(lparen))
+	  ((eq c #\]) '(rbracket))
+	  ((eq c #\[) '(lbracket))
+	  ((eq c #\|) '(vertical-bar))
 	  ((eq c #\,) (cons 'atom '|,|))
 	  ((eq c #\;) (cons 'atom '|;|))
 	  ((digit-char-p c) (unread-char c s) (cons 'int (read-int s)))
@@ -176,9 +179,14 @@
 	     (arrange (tree)
 	       (case (car tree)
 		 (struct (cons (cadr tree) (mapcar #'arrange (cddr tree))))
+		 (list (make-listterm (mapcar #'arrange (cdr tree))))
 		 (int (cdr tree))
 		 (variable (cdr tree))
 		 (otherwise (princ (car tree)) (error "Bad ast."))))
+	     (make-listterm (elements)
+	       (if (= (length elements) 2)
+		   `(|.| ,@elements)
+		   `(|.| ,(car elements) ,(make-listterm (cdr elements)))))
 	     (parse-arguments ()
 	       (let ((next (next-token)))
 		 (if (eq (car next) 'lparen)
@@ -191,6 +199,25 @@
 					(t (error "Syntax error! (near argument list)"))))))
 		       (reverse (get-args nil)))
 		     (progn (unget-token next) nil))))
+	     (parse-list ()
+	       (let ((next (next-token)))
+		 (if (eq (car next) 'rbracket)
+		     (list 'struct '|[]|)
+		     (labels ((get-args (acc)
+				(let ((arg (parse-sub *operator-list* t))
+				      (n (next-token)))
+				  (cond ((eq (car n) 'rbracket) (cons (list 'struct '|[]|) (cons arg acc)))
+					((eq (car n) 'vertical-bar)
+					 (cons (prog1
+						   (parse-sub *operator-list* t)
+						 (unless (eq (car (next-token)) 'rbracket)
+						   (error "Syntax error! (expected rbracket next to tail part)")))
+					       (cons arg acc)))
+					((commap n)
+					 (get-args (cons arg acc)))
+					(t (error "Syntax error! (near argument list)"))))))
+		       (unget-token next)
+		       `(list ,@(reverse (get-args nil)))))))
 	     (parse-prim (ignore-comma)
 	       (let ((next (next-token)))
 		 (cond ((eq (car next) 'lparen)
@@ -200,10 +227,12 @@
 			      (error "Syntax error! (no rparen)"))))
 		       ((eq (car next) 'atom)
 			`(struct ,(cdr next) ,@(parse-arguments)))
+		       ((eq (car next) 'lbracket)
+			(parse-list))
 		       (t  next))))
 	     (separatorp (tok ignore-comma)
 	       (or (and ignore-comma (commap tok))
-		   (member (car tok) '(rparen dot))))
+		   (member (car tok) '(rparen dot rbracket vertical-bar))))
 	     (operatorp (tok)
 	       (and (eq (car tok) 'atom) (get (cdr tok) 'op)))
 	     (non-operandp (tok ignore-comma)
@@ -255,7 +284,9 @@
 	(if (not (eq (car (next-token)) 'dot)) (error "Syntax error! (arity error)") result)))))
 
 (defmacro variablep (x) `(atom ,x))
+(defmacro anonymousvar-p (x) `(eq ,x '|_|))
 (defmacro termp (x) `(listp ,x))
+(defmacro listterm-p (x) `(and (listp ,x) (eq (car ,x) '|.|)))
 
 (defmacro arity (term) `(length (cdr ,term)))
 
@@ -312,7 +343,8 @@
     (dolist (v sorted-tbl)
       (loop for i from 0 to (1- (cddr v)) do
 	   (incf (nth i remain-list))))
-    (setf (car (last remain-list)) -1)
+    (when (consp remain-list)
+      (setf (car (last remain-list)) -1))
     (values assigned-tbl arity-list remain-list permanent-lastgoal-table)))
   
 
@@ -422,12 +454,103 @@
        (format t "switch-on-constant ~A~%" (cadr inst)))
       (switch-on-structure
        (format t "switch-on-structure ~A~%" (cadr inst)))
+      (neck-cut
+       (format t "neck-cut~%"))
       (get-level
        (format t "get-level Y~A~%" (cadr inst)))
       (cut
        (format t "cut Y~A~%" (cadr inst)))
       (t (error (format nil "Unknown instruction (~A)" (car inst)))))))
 
+
+(defun have-key? (ht key)
+  (multiple-value-bind (val exist) (gethash key ht)
+    exist))
+
+(defun propagate (code)
+  (let ((temporary-table (make-hash-table :test #'=))
+	(deftime-table (make-hash-table :test #'=))
+	(timestamp 0))
+    (labels ((def-temporary (var-number val)
+	       (unless (have-key? temporary-table var-number)
+		 (setf (gethash var-number temporary-table) val)
+		 (setf (gethash var-number temporary-table) (incf timestamp))))
+	     (kill-temporary (var-number val)
+	       (remhash var-number temporary-table)
+	       (remhash var-number deftime-table))
+	     (use-temporary (var-number)
+	       (when (have-key? temporary-table var-number)
+		 (let ((def-val (gethash var-number temporary-table))
+		       (def-time (gethash var-number deftime-table)))
+		   (cond ((numberp def-val) ;;variable
+			  (let (def2-time (gethash def-val deftime-table))
+			    (when def2-time
+			      (if (> def-time def2-time) def-val))))
+			 (t ;;constant
+			  def-val))))))
+      (dolist (inst rest)
+	(case (car rest)
+	  (put-variable-temporary
+	   (format t "put-variable X~A,A~A~%" (cadr inst) (caddr inst)))
+	  (put-variable-permanent
+	   (format t "put-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+	  (put-value-temporary
+	   (format t "put-value X~A,A~A~%" (cadr inst) (caddr inst)))
+	  (put-value-permanent
+	   (format t "put-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+	  (put-unsafe-value
+	   (format t "put-unsafe-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+	  (put-structure
+	   (format t "put-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+	  (put-list
+	   (format t "put-list A~A~%" (cadr inst)))
+	  (put-constant
+	   (format t "put-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+	  (set-variable-temporary
+	   (format t "set-variable X~A~%" (cadr inst)))
+	  (set-variable-permanent
+	   (format t "set-variable Y~A~%" (cadr inst)))
+	  (set-value-temporary
+	   (format t "set-value X~A~%" (cadr inst)))
+	  (set-value-permanent
+	   (format t "set-value Y~A~%" (cadr inst)))
+	  (set-local-value-temporary
+	   (format t "set-local-value X~A~%" (cadr inst)))
+	  (set-local-value-permanent
+	   (format t "set-local-value Y~A~%" (cadr inst)))
+	  (get-variable-temporary
+	   (def-temporary (cadr inst) (caddr inst)))
+	  (get-variable-permanent
+	   (format t "get-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+	  (get-value-temporary
+	   (format t "get-value X~A,A~A~%" (cadr inst) (caddr inst)))
+	  (get-value-permanent
+	   (format t "get-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+	  (get-structure
+	   (format t "get-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+	  (get-list
+	   (format t "get-list A~A~%" (cadr inst)))
+	  (get-constant
+	   (format t "get-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+	  (unify-variable-temporary
+	   (format t "unify-variable X~A~%" (cadr inst)))
+	  (unify-variable-permanent
+	   (format t "unify-variable Y~A~%" (cadr inst)))
+	  (unify-value-temporary
+	   (format t "unify-value X~A~%" (cadr inst)))
+	  (unify-value-permanent
+	   (format t "unify-value Y~A~%" (cadr inst)))
+	  (unify-local-value-temporary
+	   (format t "unify-local-value X~A~%" (cadr inst)))
+	  (unify-local-value-permanent
+	   (format t "unify-local-value Y~A~%" (cadr inst)))
+	  (call
+	   (format t "call ~A/~A,~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+	  (execute
+	   (format t "execute ~A/~A~%" (caadr inst) (cdadr inst)))
+	  (t (error (format nil "Unknown instruction (~A)" (car inst)))))))
+    
+  
 (defmacro cons-when (condition element list)
   `(if ,condition
        (cons ,element ,list)
@@ -465,7 +588,8 @@
 		   (let ((A 0))
 		     (mapcan (lambda (arg)
 			       (incf A)
-			       (cond ((variablep arg)
+			       (cond ((anonymousvar-p arg) nil)
+				     ((variablep arg)
 				      (let ((vardata (cdr (assoc arg assign-table))))
 					(list
 					 (case (car vardata)
@@ -479,14 +603,20 @@
 						(prog1 `(get-variable-permanent ,(cdr vardata) ,A)
 						  (rplacd (assoc arg varstate-table) 'initialized))   
 						`(get-value-permanent ,(cdr vardata) ,A)))))))
+				     ((listterm-p arg)
+				      `((get-list ,A)
+					,@(compile-head-struct-args (cdr arg))))
 				     ((termp arg)
-				      `((get-structure ,(cons (car arg) (arity arg)) ,A)
-					,@(compile-head-struct-args (cdr arg))))))
+				      (if (= (arity arg) 0)
+					  `((get-constant ,(car arg) ,A))
+					  `((get-structure ,(cons (car arg) (arity arg)) ,A)
+					    ,@(compile-head-struct-args (cdr arg)))))))
 			     (cdr term))))
 		 (compile-head-struct-args (struct-args)
 		   (let (remaining-code) ;;code for nested structure which must be put after unification of parent structure
 		     (nconc (mapcan (lambda (arg)
-				      (cond ((variablep arg)
+				      (cond ((anonymousvar-p arg) (list (list 'unify-void 1)))
+					    ((variablep arg)
 					     (let ((vardata (cdr (assoc arg assign-table))))
 					       (list
 						(case (car vardata)
@@ -502,19 +632,33 @@
 							  `(unify-local-value-permanent ,(cdr vardata)))
 							 (t (rplacd (assoc arg varstate-table) 'globalized)
 							    `(unify-variable-permanent ,(cdr vardata)))))))))
-					    ((termp arg)
+					    ((listterm-p arg)
 					     (let ((tempvar (incf (first register-next))))
 					       (prog1
 						   `((unify-variable-temporary ,tempvar))
-						 (nconc remaining-code
-							`((get-structure ,(cons (car arg) (arity arg)) ,tempvar)
-							  ,@(compile-head-struct-args (cdr arg)))))))))
+						 (setq remaining-code
+						       (append remaining-code
+							       `((get-list ,tempvar)
+								 ,@(compile-head-struct-args (cdr arg))))))))
+					    ((termp arg)
+					     (let ((tempvar (incf (first register-next))))
+					       (if (= (arity arg) 0)
+						   `((unify-constant ,(car arg)))
+						   (prog1
+						       `((unify-variable-temporary ,tempvar))
+						     (setq remaining-code
+							   (append remaining-code
+								   `((get-structure ,(cons (car arg) (arity arg)) ,tempvar)
+								     ,@(compile-head-struct-args (cdr arg)))))))))))
 				    struct-args) remaining-code)))
-		 (compile-body-term (term)
+		 (compile-body-term (term body-num)
 		   (let ((A 0))
 		     (mapcan (lambda (arg)
 			       (incf A)
-			       (cond ((variablep arg)
+			       (cond ((anonymousvar-p arg)
+				      (let ((tempvar (incf (nth body-num register-next))))
+					`((put-variable-temporary ,tempvar ,A))))
+				     ((variablep arg)
 				      (let ((vardata (cdr (assoc arg assign-table))))
 					(list
 					 (case (car vardata)
@@ -532,15 +676,21 @@
 						       `(put-value-permanent ,(cdr vardata) ,A)))
 						  (t (rplacd (assoc arg varstate-table) 'initialized)
 						     `(put-variable-permanent ,(cdr vardata) ,A))))))))
+				     ((listterm-p arg)
+				      `((put-list ,A)
+					,@(compile-body-struct-args (cdr arg) body-num)))
 				     ((termp arg)
-				      `((put-structure ,(cons (car arg) (arity arg)) ,A)
-					,@(compile-body-struct-args (cdr arg))))))
+				      (if (= (arity arg) 0)
+					  `((put-constant ,(car arg) ,A))
+					  `((put-structure ,(cons (car arg) (arity arg)) ,A)
+					    ,@(compile-body-struct-args (cdr arg) body-num))))))
 			     (cdr term))))
-		 (compile-body-struct-args (struct-args)
+		 (compile-body-struct-args (struct-args body-num)
 		   (let (prep-code)
 		     (nconc prep-code
 			    (mapcan (lambda (arg)
-				      (cond ((variablep arg)
+				      (cond ((anonymousvar-p arg) (list (list 'set-void 1)))
+					    ((variablep arg)
 					     (let ((vardata (cdr (assoc arg assign-table))))
 					       (list
 						(case (car vardata)
@@ -556,21 +706,34 @@
 							  `(set-local-value-permanent ,(cdr vardata)))
 							 (t (rplacd (assoc arg varstate-table) 'globalized)
 							    `(set-variable-permanent ,(cdr vardata)))))))))
-					    ((termp arg)
-					     (let ((tempvar (incf (first register-next))))
+					    ((listterm-p arg)
+					     (let ((tempvar (incf (nth body-num register-next))))
 					       (prog1
 						   `((set-value-temporary ,tempvar))
-						 (nconc prep-code
-							`((put-structure ,(cons (car arg) (arity arg)) ,tempvar)
-							  ,@(compile-head-struct-args (cdr arg)))))))))
+						 (setq prep-code
+						       (append prep-code
+							       `((put-list ,tempvar)
+								 ,@(compile-head-struct-args (cdr arg))))))))
+					    ((termp arg)
+					     (let ((tempvar (incf (nth body-num register-next))))
+					       (if (= (arity arg) 0)
+						   `((set-constant ,(car arg)))
+						   (prog1
+						       `((set-value-temporary ,tempvar))
+						     (setq prep-code
+							   (append prep-code
+								   `((put-structure ,(cons (car arg) (arity arg)) ,tempvar)
+								     ,@(compile-head-struct-args (cdr arg)))))))))))
 				    struct-args)))))
-	  (let ((have-permanent (some #'plusp remain-list)))
+	  (let ((have-permanent (some #'plusp remain-list)) (body-num -1)
+		(deallocate-emitted nil))
 	    (cons-when have-permanent
 		       (list 'allocate) (append (compile-head-term head)
 						(mapcan (lambda (b remain)
-							  (append (compile-body-term b)
-								  (cons-when (and have-permanent (= -1 remain))
-									     (list 'deallocate)
+							  (incf body-num)
+							  (append (compile-body-term b body-num)
+								  (cons-when (and have-permanent (>= 0 remain) (not deallocate-emitted))
+									     (prog1 (list 'deallocate) (setf deallocate-emitted t))
 									     (list
 									      (if (= -1 remain)
 										  `(execute ,(cons (car b) (arity b)))
@@ -755,7 +918,7 @@ heap: -2,-4,-6,...
 					   (incf P)))
 		       (put-structure (let ((f (cadr inst)) (a (caddr inst)))
 					(setf (heap H) (cons 'functor f))
-					(setf (register a) (cons str H))
+					(setf (register a) (cons 'struct H))
 					(setf H (addr+ H 1))
 					(incf P)))
 		       (put-list (let ((a (cadr inst)))
@@ -824,7 +987,7 @@ heap: -2,-4,-6,...
 		       (get-structure (let* ((f (cadr inst)) (a (caddr inst))
 					     (addr (dereference a)))
 					(case (car (car (store addr)))
-					  (ref (setf (heap h) (cons 'str (addr+ H 1)))
+					  (ref (setf (heap h) (cons 'struct (addr+ H 1)))
 					       (setf (heap (addr+ h 1)) f)
 					       (bind addr H)
 					       (setf H (addr+ H 2))
@@ -1047,7 +1210,7 @@ heap: -2,-4,-6,...
 					   (ref (setf P v))
 					   (con (setf P c))
 					   (lis (setf P l))
-					   (struct (strf P s)))))
+					   (struct (setf P s)))))
 		       (switch-on-constant (let* ((alist (cadr inst))
 						  (val (cdr (store (dereference (register 1)))))
 						  (result (assoc val alist)))
