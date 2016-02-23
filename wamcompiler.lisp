@@ -323,22 +323,25 @@
 
 (defun assign-variables (head body)
   (let* ((Y-counter 0) (arity-list (make-arity-list head body))
+	 (A-counter (apply #'max arity-list))
 	 (postbl (make-varposition-table (cons (head-firstbody-conj head body) (cdr body))))
 	 (sorted-tbl (sort postbl (lambda (x y) (> (cddr x) (cddr y)))))
 	 (assigned-tbl (mapcar (lambda (v)
 				 (let ((var (car v))
 				       (first-appear (cadr v)) (last-appear (cddr v)))
 				   (if (= first-appear last-appear)
-				       (cons var (cons 'temporary (incf (nth first-appear arity-list))))
+				       (cons var (cons 'temporary (incf A-counter)))
 				       (cons var (cons 'permanent (incf Y-counter)))))) sorted-tbl))
 	 (remain-list (make-list (length body) :initial-element 0))
+	 (head-vars (collect-vars head))
 	 (permanent-lastgoal-table
-	  (let ((body-postbl (make-varposition-table body)))
-	    (remove-if #'null (mapcar (lambda (v)
-					(let ((var (car v))
-					      (first-appear (cadr v)) (last-appear (cddr v)))
-					  (when (/= first-appear last-appear)
-					    (cons var last-appear)))) body-postbl)))))
+	  (remove-if (lambda (i)
+		       (if (and (consp i) (member (car i) head-vars)) i))
+		     (mapcar (lambda (v)
+			       (let ((var (car v))
+				     (first-appear (cadr v)) (last-appear (cddr v)))
+				 (when (/= first-appear last-appear)
+				   (cons var last-appear)))) postbl))))
     ;;make remain-list
     (dolist (v sorted-tbl)
       (loop for i from 0 to (1- (cddr v)) do
@@ -463,92 +466,302 @@
       (t (error (format nil "Unknown instruction (~A)" (car inst)))))))
 
 
-(defun have-key? (ht key)
+(defun have-key? (key ht)
   (multiple-value-bind (val exist) (gethash key ht)
     exist))
 
-(defun propagate (code)
-  (let ((temporary-table (make-hash-table :test #'=))
-	(deftime-table (make-hash-table :test #'=))
-	(timestamp 0))
+(defmacro awhen (condition &body body)
+  `(let ((it ,condition))
+     (when it
+       ,@body)))
+
+(defun propagate! (code)
+  (let ((temporary-table (make-hash-table :test #'eq))
+	(deftime-table (make-hash-table :test #'eq))
+	(timestamp 0)
+	(changed? nil))
     (labels ((def-temporary (var-number val)
-	       (unless (have-key? temporary-table var-number)
+	       (unless (have-key? var-number temporary-table)
 		 (setf (gethash var-number temporary-table) val)
-		 (setf (gethash var-number temporary-table) (incf timestamp))))
-	     (kill-temporary (var-number val)
+		 (setf (gethash var-number deftime-table) (incf timestamp))))
+	     (def-temporary-force (var-number val)
+	       (kill-temporary var-number)
+	       (def-temporary var-number val))
+	     (kill-temporary (var-number)
 	       (remhash var-number temporary-table)
 	       (remhash var-number deftime-table))
-	     (use-temporary (var-number)
-	       (when (have-key? temporary-table var-number)
-		 (let ((def-val (gethash var-number temporary-table))
-		       (def-time (gethash var-number deftime-table)))
-		   (cond ((numberp def-val) ;;variable
-			  (let (def2-time (gethash def-val deftime-table))
-			    (when def2-time
-			      (if (> def-time def2-time) def-val))))
-			 (t ;;constant
-			  def-val))))))
-      (dolist (inst rest)
-	(case (car rest)
+	     (use-temporary-sub (var-number)
+	       (when (have-key? var-number temporary-table)
+		 (let* ((def-val (gethash var-number temporary-table))
+			(def-time (gethash var-number deftime-table))
+			(def2-time (gethash def-val deftime-table)))
+		   (if def2-time
+		       (if (> def-time def2-time) def-val)
+		       def-val)))))
+      (macrolet ((use-temporary (pos)
+		   `(awhen (use-temporary-sub ,pos)
+		      (setf changed? t) (setf ,pos it))))
+	(dolist (inst code)
+	  (case (car inst)
+	    (put-variable-temporary
+	     (def-temporary (caddr inst) (cadr inst)))
+	    (put-value-temporary
+	     (def-temporary (caddr inst) (cadr inst))
+	     (use-temporary (cadr inst)))
+	    (get-variable-temporary
+	     (def-temporary (cadr inst) (caddr inst))
+	     (use-temporary (cadr inst)))
+	    (get-value-temporary
+	     (def-temporary (cadr inst) (caddr inst))
+	     (use-temporary (cadr inst)))
+	    (set-variable-temporary
+	     (use-temporary (cadr inst)))
+	    (set-value-temporary
+	     (use-temporary (cadr inst)))
+	    (set-local-value-temporary
+	     (use-temporary (cadr inst)))
+	    (unify-variable-temporary
+	     (use-temporary (cadr inst)))
+	    (unify-value-temporary
+	     (use-temporary (cadr inst)))
+	    (unify-local-value-temporary
+	     (use-temporary (cadr inst)))
+	    ((call execute)
+	     (clrhash temporary-table)
+	     (clrhash deftime-table))))
+	(values code changed?)))))
+
+(defun remove-unnecessary-code (code)
+  (let ((changed? nil))
+    (labels ((not-used (var-number rest-code)
+	       (dolist (inst rest-code)
+		 (case (car inst)
+		   ((put-variable-temporary
+		     put-value-temporary
+		     set-variable-temporary
+		     set-value-temporary
+		     set-local-value-temporary
+		     get-variable-temporary
+		     get-value-temporary
+		     unify-variable-temporary
+		     unify-value-temporary
+		     unify-local-value-temporary)
+		    (if (= (cadr inst) var-number) (return nil)))
+		   ((call execute)
+		    (return t))))))
+      (values
+       (remove nil
+	       (maplist (lambda (current-code)
+			  (let ((inst (car current-code)))
+			    (case (car inst)
+			      ((put-variable-temporary put-value-temporary)
+			       (cond ((= (cadr inst) (caddr inst)) (setq changed? t) nil)
+				     (t inst)))
+			      ((get-variable-temporary get-value-temporary)
+			       (cond ((or (= (cadr inst) (caddr inst))
+					  (not-used (cadr inst) (cdr current-code)))
+				      (setq changed? t) nil)
+				     (t inst)))
+			      (t inst))))
+			code))
+       changed?))))
+  
+
+;;remove put/set/unify instruction which operands are not initialized.
+(defun remove-uninitialized-variable (code)
+  (let ((changed? nil)
+	(lookedvars nil))
+    (values
+     (remove nil
+	     (maplist (lambda (current-code)
+			(let ((inst (car current-code)))
+			  (case (car inst)
+			    ((get-variable-temporary
+			      get-value-temporary)
+			     (pushnew (cadr inst) lookedvars)
+			     (pushnew (caddr inst) lookedvars)
+			     inst)
+			    ((unify-variable-temporary
+			      unify-value-temporary
+			      unify-local-value-temporary)
+			     (pushnew (cadr inst) lookedvars)
+			     inst)
+			    ((put-variable-temporary
+			      put-value-temporary
+			      set-variable-temporary
+			      set-value-temporary
+			      set-local-value-temporary)
+			     (if (member (cadr inst) lookedvars)
+				 inst
+				 nil))
+			    (t inst))))
+		      code))
+     changed?)))
+
+;;must be called before calling reallocate-registers!
+(defun set-unsafe-and-local! (code)
+  (let ((temporary-state-table (make-hash-table :test #'eq))
+	(permanent-state-table (make-hash-table :test #'eq))
+	(permanent-lastgoal-table (make-hash-table :test #'eq)))
+    (let ((body-num 0))
+      (dolist (inst code)
+	(case (car inst)
+	  ((put-variable-permanent
+	    put-value-permanent
+	    set-variable-permanent
+	    set-value-permanent
+	    get-variable-permanent
+	    get-value-permanent
+	    unify-variable-permanent
+	    unify-value-permanent)
+	   (setf (gethash (cadr inst) permanent-lastgoal-table) body-num))
+	  ((call execute)
+	   (incf body-num)))))
+    (let ((body-num 0))
+      (dolist (inst code)
+	(case (car inst)
 	  (put-variable-temporary
-	   (format t "put-variable X~A,A~A~%" (cadr inst) (caddr inst)))
+	   (unless (have-key? (cadr inst) temporary-state-table)
+	     (setf (gethash (cadr inst) temporary-state-table) 'on-heap)))
 	  (put-variable-permanent
-	   (format t "put-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+	   (unless (have-key? (cadr inst) permanent-state-table)
+	     (setf (gethash (cadr inst) permanent-state-table) 'initialized)))
 	  (put-value-temporary
-	   (format t "put-value X~A,A~A~%" (cadr inst) (caddr inst)))
+	   (unless (have-key? (cadr inst) temporary-state-table)
+	     (setf (gethash (cadr inst) temporary-state-table) 'initialized)))
 	  (put-value-permanent
-	   (format t "put-value Y~A,A~A~%" (cadr inst) (caddr inst)))
-	  (put-unsafe-value
-	   (format t "put-unsafe-value Y~A,A~A~%" (cadr inst) (caddr inst)))
-	  (put-structure
-	   (format t "put-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
-	  (put-list
-	   (format t "put-list A~A~%" (cadr inst)))
-	  (put-constant
-	   (format t "put-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+	   (when (and
+		  (have-key? (cadr inst) permanent-state-table)
+		  (eq 'initialized (gethash (cadr inst) permanent-state-table))
+		  (eq body-num (gethash (cadr inst) permanent-lastgoal-table)))
+	     (setf (car inst) 'put-unsafe-value)
+	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap))    
+	   (unless (have-key? (cadr inst) permanent-state-table)
+	     (setf (gethash (cadr inst) permanent-state-table) 'initialized)))
 	  (set-variable-temporary
-	   (format t "set-variable X~A~%" (cadr inst)))
+	   (unless (have-key? (cadr inst) temporary-state-table)
+	     (setf (gethash (cadr inst) temporary-state-table) 'on-heap)))
 	  (set-variable-permanent
-	   (format t "set-variable Y~A~%" (cadr inst)))
+	   (unless (have-key? (cadr inst) permanent-state-table)
+	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap)))
 	  (set-value-temporary
-	   (format t "set-value X~A~%" (cadr inst)))
+	   (when (and
+		  (have-key? (cadr inst) temporary-state-table)
+		  (eq 'initialized (gethash (cadr inst) temporary-state-table)))
+	     (setf (car inst) 'set-local-value-temporary)
+	     (setf (gethash (cadr inst) temporary-state-table) 'on-heap)))
 	  (set-value-permanent
-	   (format t "set-value Y~A~%" (cadr inst)))
-	  (set-local-value-temporary
-	   (format t "set-local-value X~A~%" (cadr inst)))
-	  (set-local-value-permanent
-	   (format t "set-local-value Y~A~%" (cadr inst)))
+	   (when (and
+		  (have-key? (cadr inst) permanent-state-table)
+		  (eq 'initialized (gethash (cadr inst) permanent-state-table)))
+	     (setf (car inst) 'set-local-value-permanent)
+	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap)))
 	  (get-variable-temporary
-	   (def-temporary (cadr inst) (caddr inst)))
+	   (unless (have-key? (cadr inst) temporary-state-table)
+	     (setf (gethash (cadr inst) temporary-state-table) 'initialized)))
 	  (get-variable-permanent
-	   (format t "get-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+	   (unless (have-key? (cadr inst) permanent-state-table)
+	     (setf (gethash (cadr inst) permanent-state-table) 'initialized)))
 	  (get-value-temporary
-	   (format t "get-value X~A,A~A~%" (cadr inst) (caddr inst)))
+	   (unless (have-key? (cadr inst) temporary-state-table)
+	     (setf (gethash (cadr inst) temporary-state-table) 'initialized)))
 	  (get-value-permanent
-	   (format t "get-value Y~A,A~A~%" (cadr inst) (caddr inst)))
-	  (get-structure
-	   (format t "get-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
-	  (get-list
-	   (format t "get-list A~A~%" (cadr inst)))
-	  (get-constant
-	   (format t "get-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+	   (unless (have-key? (cadr inst) permanent-state-table)
+	     (setf (gethash (cadr inst) permanent-state-table) 'initialized)))
 	  (unify-variable-temporary
-	   (format t "unify-variable X~A~%" (cadr inst)))
+	   (unless (have-key? (cadr inst) temporary-state-table)
+	     (setf (gethash (cadr inst) temporary-state-table) 'on-heap)))
 	  (unify-variable-permanent
-	   (format t "unify-variable Y~A~%" (cadr inst)))
+	   (unless (have-key? (cadr inst) permanent-state-table)
+	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap)))
 	  (unify-value-temporary
-	   (format t "unify-value X~A~%" (cadr inst)))
+	   (when (and
+		  (have-key? (cadr inst) temporary-state-table)
+		  (eq 'initialized (gethash (cadr inst) temporary-state-table)))
+	     (setf (car inst) 'unify-local-value-temporary)
+	     (setf (gethash (cadr inst) temporary-state-table) 'on-heap))
+	   (unless (have-key? (cadr inst) temporary-state-table)
+	     (setf (gethash (cadr inst) temporary-state-table) 'on-heap)))
 	  (unify-value-permanent
-	   (format t "unify-value Y~A~%" (cadr inst)))
-	  (unify-local-value-temporary
-	   (format t "unify-local-value X~A~%" (cadr inst)))
-	  (unify-local-value-permanent
-	   (format t "unify-local-value Y~A~%" (cadr inst)))
-	  (call
-	   (format t "call ~A/~A,~A~%" (caadr inst) (cdadr inst) (caddr inst)))
-	  (execute
-	   (format t "execute ~A/~A~%" (caadr inst) (cdadr inst)))
-	  (t (error (format nil "Unknown instruction (~A)" (car inst)))))))
+	   (when (and
+		  (have-key? (cadr inst) permanent-state-table)
+		  (eq 'initialized (gethash (cadr inst) permanent-state-table)))
+	     (setf (car inst) 'unify-local-value-permanent)
+	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap))
+	   (unless (have-key? (cadr inst) permanent-state-table)
+	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap)))
+	  ((call execute)
+	   (incf body-num)))))
+    code))
+
+	
+
+(defun reallocate-registers! (code head body)
+  (let* ((arity-list (make-arity-list head body))
+	 (A-start (1+ (apply #'max arity-list)))
+	 (using-register-list (list nil)))
+    ;;collect temporary variables...
+    	(dolist (inst code)
+	  (case (car inst)
+	    ((put-variable-temporary
+	      put-value-temporary
+	      get-variable-temporary
+	      get-value-temporary
+	      set-variable-temporary
+	      set-value-temporary
+	      set-local-value-temporary
+	      unify-variable-temporary
+	      unify-value-temporary
+	      unify-local-value-temporary)
+	     (when (>= (cadr inst) A-start)
+	       (pushnew (cadr inst) (car using-register-list))))
+	    ((call execute)
+	     (push nil using-register-list))))
+	(let ((reallocate-list
+	       (mapcar (lambda (clause-regs clause-arity)
+			 (mapcar (lambda (r)
+				   (cons r (incf clause-arity)))
+				 clause-regs))
+		       (reverse using-register-list) arity-list)))
+	  (dolist (inst code)
+	    (case (car inst)
+	      ((put-variable-temporary
+		put-value-temporary
+		get-variable-temporary
+		get-value-temporary
+		set-variable-temporary
+		set-value-temporary
+		set-local-value-temporary
+		unify-variable-temporary
+		unify-value-temporary
+		unify-local-value-temporary)
+	       (awhen (assoc (cadr inst) (car reallocate-list))
+		 (setf (cadr inst) (cdr it))))
+	      ((call execute)
+	       (setq reallocate-list (cdr reallocate-list)))))
+	  code)))
+	  
+(defun propagate-test ()
+  (let ((clause (parse *standard-input*)))
+    (multiple-value-bind (head body) (devide-head-body clause)
+      (let ((compiled (compile-clause clause)))
+	(print-wamcode compiled)
+	(format t "***************~%")
+	(multiple-value-bind (newcode changed?) (propagate! compiled)
+	  (print-wamcode newcode)
+	  (format t "***************~%")
+	  (multiple-value-bind (newcode changed?) (remove-unnecessary-code newcode)
+	    (print-wamcode newcode)
+	    (format t "***************~%")
+	    (multiple-value-bind (newcode changed?) (remove-uninitialized-variable newcode)
+	      (print-wamcode newcode)
+	      (format t "***************~%")
+	      (let ((newcode (set-unsafe-and-local! newcode)))
+		(print-wamcode newcode)
+		(format t "***************~%")
+		(let ((newcode (reallocate-registers!  newcode head body)))
+		  (print-wamcode newcode)
+		changed?)))))))))
     
   
 (defmacro cons-when (condition element list)
@@ -556,7 +769,7 @@
        (cons ,element ,list)
        ,list))
 
-(defun compile-clause (clause)
+(defun devide-head-body (clause)
   (destructuring-bind (head . body) (cond ((and (eq (car clause) '|:-|) (= (arity clause) 2))
 					 (cons (cadr clause) (flatten-comma (caddr clause))))
 					((and (eq (car clause) '|:-|) (= (arity clause) 1))
@@ -565,6 +778,10 @@
 					 (cons nil (flatten-comma (cadr clause))))
 					(t
 					 (cons clause nil)))
+    (values head body)))
+
+(defun compile-clause (clause)
+  (multiple-value-bind  (head body) (devide-head-body clause)
     (multiple-value-bind (assign-table register-next remain-list permanent-lastgoal-tbl) (assign-variables head body)
       (let ((varstate-table (mapcar (lambda (v) (cons (car v) 'uninitialized)) assign-table))) ;;uninitialized/initialized/globalized
 	(labels ((uninitialized-p (var)
@@ -623,13 +840,13 @@
 						  (temporary
 						   (cond ((globalized-p arg) `(unify-value-temporary ,(cdr vardata)))
 						  ((initialized-p arg) (rplacd (assoc arg varstate-table) 'globalized)
-						   `(unify-local-value-temporary ,(cdr vardata)))
+						   `(unify-value-temporary ,(cdr vardata)))
 						  (t (rplacd (assoc arg varstate-table) 'globalized)
 						     `(unify-variable-temporary ,(cdr vardata)))))
 						  (permanent
 						   (cond ((globalized-p arg) `(unify-value-permanent ,(cdr vardata)))
 							 ((initialized-p arg) (rplacd (assoc arg varstate-table) 'globalized)
-							  `(unify-local-value-permanent ,(cdr vardata)))
+							  `(unify-value-permanent ,(cdr vardata)))
 							 (t (rplacd (assoc arg varstate-table) 'globalized)
 							    `(unify-variable-permanent ,(cdr vardata)))))))))
 					    ((listterm-p arg)
@@ -670,8 +887,8 @@
 					   (permanent
 					    (cond ((globalized-p arg) `(put-value-permanent ,(cdr vardata) ,A))
 						  ((initialized-p arg)
-						   (if (= A (cdr (assoc arg permanent-lastgoal-tbl)))
-						       (prog1 `(put-unsafe-value ,(cdr vardata) ,A)
+						   (if (eq body-num (cdr (assoc arg permanent-lastgoal-tbl)))
+						       (prog1 `(put-value-permanent ,(cdr vardata) ,A)
 							   (rplacd (assoc arg varstate-table) 'globalized))
 						       `(put-value-permanent ,(cdr vardata) ,A)))
 						  (t (rplacd (assoc arg varstate-table) 'initialized)
@@ -697,13 +914,13 @@
 						  (temporary
 						   (cond ((globalized-p arg) `(set-value-temporary ,(cdr vardata)))
 							 ((initialized-p arg) (rplacd (assoc arg varstate-table) 'globalized)
-							  `(set-local-value-temporary ,(cdr vardata)))
+							  `(set-value-temporary ,(cdr vardata)))
 							 (t (rplacd (assoc arg varstate-table) 'globalized)
 							    `(set-variable-temporary ,(cdr vardata)))))
 						  (permanent
 						   (cond ((globalized-p arg) `(set-value-permanent ,(cdr vardata)))
 							 ((initialized-p arg) (rplacd (assoc arg varstate-table) 'globalized)
-							  `(set-local-value-permanent ,(cdr vardata)))
+							  `(set-value-permanent ,(cdr vardata)))
 							 (t (rplacd (assoc arg varstate-table) 'globalized)
 							    `(set-variable-permanent ,(cdr vardata)))))))))
 					    ((listterm-p arg)
