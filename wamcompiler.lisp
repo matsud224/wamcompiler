@@ -348,7 +348,7 @@
 	   (incf (nth i remain-list))))
     (when (consp remain-list)
       (setf (car (last remain-list)) -1))
-    (values assigned-tbl arity-list remain-list permanent-lastgoal-table)))
+    (values assigned-tbl A-counter remain-list permanent-lastgoal-table)))
   
 
 (defun assign-test ()
@@ -475,128 +475,165 @@
      (when it
        ,@body)))
 
-(defun propagate! (code)
-  (let ((temporary-table (make-hash-table :test #'eq))
-	(deftime-table (make-hash-table :test #'eq))
-	(timestamp 0)
-	(changed? nil))
-    (labels ((def-temporary (var-number val)
-	       (unless (have-key? var-number temporary-table)
-		 (setf (gethash var-number temporary-table) val)
-		 (setf (gethash var-number deftime-table) (incf timestamp))))
-	     (def-temporary-force (var-number val)
-	       (kill-temporary var-number)
-	       (def-temporary var-number val))
-	     (kill-temporary (var-number)
-	       (remhash var-number temporary-table)
-	       (remhash var-number deftime-table))
-	     (use-temporary-sub (var-number)
-	       (when (have-key? var-number temporary-table)
-		 (let* ((def-val (gethash var-number temporary-table))
-			(def-time (gethash var-number deftime-table))
-			(def2-time (gethash def-val deftime-table)))
-		   (if def2-time
-		       (if (> def-time def2-time) def-val)
-		       def-val)))))
-      (macrolet ((use-temporary (pos)
-		   `(awhen (use-temporary-sub ,pos)
-		      (setf changed? t) (setf ,pos it))))
-	(dolist (inst code)
-	  (case (car inst)
-	    (put-variable-temporary
-	     (def-temporary (caddr inst) (cadr inst)))
-	    (put-value-temporary
-	     (def-temporary (caddr inst) (cadr inst))
-	     (use-temporary (cadr inst)))
-	    (get-variable-temporary
-	     (def-temporary (cadr inst) (caddr inst))
-	     (use-temporary (cadr inst)))
-	    (get-value-temporary
-	     (def-temporary (cadr inst) (caddr inst))
-	     (use-temporary (cadr inst)))
-	    (set-variable-temporary
-	     (use-temporary (cadr inst)))
-	    (set-value-temporary
-	     (use-temporary (cadr inst)))
-	    (set-local-value-temporary
-	     (use-temporary (cadr inst)))
-	    (unify-variable-temporary
-	     (use-temporary (cadr inst)))
-	    (unify-value-temporary
-	     (use-temporary (cadr inst)))
-	    (unify-local-value-temporary
-	     (use-temporary (cadr inst)))
-	    ((call execute)
-	     (clrhash temporary-table)
-	     (clrhash deftime-table))))
-	(values code changed?)))))
+(defmacro awhile (condition &body body)
+  `(loop
+	(let ((it ,condition))
+	  (if it
+	      (progn ,@body)
+	      (return)))))
+
+(defmacro aif (condition true-part &optional false-part)
+  `(let ((it ,condition))
+     (if it ,true-part ,false-part)))
+
+
+(defun sublis-temporary! (code replace-alist)
+  (dolist (inst code)
+    (case (car inst)
+      ((put-variable-temporary
+	put-value-temporary
+	put-list
+	set-variable-temporary
+	set-value-temporary
+	get-variable-temporary
+	get-value-temporary
+	get-list
+	unify-variable-temporary
+	unify-value-temporary)
+       (awhen (assoc (cadr inst) replace-alist)
+	 (setf (cadr inst) (cdr it))))
+      ((put-structure
+	put-constant
+	get-structure
+	get-constant)
+       (awhen (assoc (caddr inst) replace-alist)
+	 (setf (caddr inst) (cdr it))))))
+  code)
+
+
+(defun make-replace-alist (partial-code A-start)
+  (let (modified-temporary-list modified-register-list replace-alist)
+    (labels ((x? (n)
+	       (>= n A-start))
+	     (can-replace (tempvar register)
+	       (unless (assoc tempvar replace-alist)
+		 (push (cons tempvar register) replace-alist)))
+	     (modify-register (r)
+	       (mapc (lambda (p) (when (eq (cdr p) r) (pushnew (car p) modified-temporary-list))) replace-alist))
+	     (modify-temporary (temp)
+	       (awhen (assoc temp replace-alist)
+		 (pushnew (cdr it) modified-register-list)))
+	     (use-temporary (temp-var)
+	       (when (member temp-var modified-temporary-list)
+		 (setq replace-alist (remove-if (lambda (p) (eq (car p) temp-var)) replace-alist))))
+	     (use-register (reg)
+	       (when (member reg modified-register-list)
+		 (setq replace-alist (remove-if (lambda (p) (eq (cdr p) reg)) replace-alist)))))
+      (dolist (inst partial-code)
+	(case (car inst)
+	  (put-variable-temporary
+	   (can-replace (second inst) (third inst)))
+	  (put-value-temporary
+	   (can-replace (second inst) (third inst)))
+	  (get-variable-temporary
+	   (can-replace (second inst) (third inst)))
+	  (get-value-temporary
+	   (can-replace (second inst) (third inst)))))
+      (dolist (inst partial-code)
+	(case (car inst)
+	  (put-variable-temporary
+	   (modify-temporary (second inst))
+	   (modify-register (third inst)))
+	  (put-variable-permanent
+	   (modify-register (third inst)))
+	  (put-value-temporary
+	   (use-temporary (second inst))
+	   (modify-register (third inst)))
+	  (put-value-permanent
+	   (modify-register (third inst)))
+	  (put-structure
+	   (if (x? (third inst))
+	       (modify-temporary (third inst))
+	       (modify-register (third inst))))
+	  (put-list
+	   (if (x? (second inst))
+	       (modify-temporary (second inst))
+	       (modify-register (second inst))))
+	  (put-constant
+	   (if (x? (third inst))
+	       (modify-temporary (third inst))
+	       (modify-register (third inst))))
+	  (get-variable-temporary
+	   (use-register (third inst))
+	   (modify-temporary (second inst)))
+	  (get-variable-permanent
+	   (use-register (third inst)))
+	  (get-value-temporary
+	   (use-register (third inst))
+	   (use-temporary (second inst)))
+	  (get-value-permanent
+	   (use-register (third inst)))
+	  (get-structure
+	   (if (x? (third inst))
+	       (use-temporary (third inst))
+	       (use-register (third inst))))
+	  (get-list
+	   (if (x? (second inst))
+	       (use-temporary (second inst))
+	       (use-register (second inst))))
+	  (get-constant
+	   (if (x? (third inst))
+	       (use-temporary (third inst))
+	       (use-register (third inst))))
+	  (set-variable-temporary
+	   (if (x? (second inst))
+	       (modify-temporary (second inst))
+	       (modify-register (second inst))))
+	  (set-value-temporary
+	   (if (x? (second inst))
+	       (use-temporary (second inst))
+	       (use-register (second inst))))
+	  (unify-variable-temporary
+	   (if (x? (second inst))
+	       (modify-temporary (second inst))
+	       (modify-register (second inst))))
+	  (unify-value-temporary
+	   (if (x? (second inst))
+	       (use-temporary (second inst))
+	       (use-register (second inst))))))
+      replace-alist)))
+	 
+
+(defun optimize-head (partial-code A-start)
+  (sublis-temporary! partial-code (make-replace-alist partial-code A-start)))
+    
+(defun analyze-body (partial-code)
+  (let ((replace-alist nil))
+    (dolist (inst partial-code)
+      (case (car inst)
+	((put-variable-temporary
+	  put-value-temporary)
+	 (if (assoc (cadr inst) replace-alist)
+	     (rplacd (assoc (cadr inst) replace-alist) (caddr inst))
+	     (push (cons (cadr inst) (caddr inst)) replace-alist)))))
+      replace-alist))
+
+(defun optimize-body (partial-code A-start)
+  (sublis-temporary! partial-code (make-replace-alist partial-code A-start)))
+
 
 (defun remove-unnecessary-code (code)
-  (let ((changed? nil))
-    (labels ((not-used (var-number rest-code)
-	       (dolist (inst rest-code)
-		 (case (car inst)
-		   ((put-variable-temporary
-		     put-value-temporary
-		     set-variable-temporary
-		     set-value-temporary
-		     set-local-value-temporary
-		     get-variable-temporary
-		     get-value-temporary
-		     unify-variable-temporary
-		     unify-value-temporary
-		     unify-local-value-temporary)
-		    (if (= (cadr inst) var-number) (return nil)))
-		   ((call execute)
-		    (return t))))))
-      (values
-       (remove nil
-	       (maplist (lambda (current-code)
-			  (let ((inst (car current-code)))
-			    (case (car inst)
-			      ((put-variable-temporary put-value-temporary)
-			       (cond ((= (cadr inst) (caddr inst)) (setq changed? t) nil)
-				     (t inst)))
-			      ((get-variable-temporary get-value-temporary)
-			       (cond ((or (= (cadr inst) (caddr inst))
-					  (not-used (cadr inst) (cdr current-code)))
-				      (setq changed? t) nil)
-				     (t inst)))
-			      (t inst))))
-			code))
-       changed?))))
+  (remove nil
+	  (maplist (lambda (current-code)
+		     (let ((inst (car current-code)))
+		       (case (car inst)
+			 ((put-value-temporary
+			   get-variable-temporary get-value-temporary)
+			  (unless (= (cadr inst) (caddr inst))
+			    inst))
+			 (t inst))))
+		   code)))
   
-
-;;remove put/set/unify instruction which operands are not initialized.
-(defun remove-uninitialized-variable (code)
-  (let ((changed? nil)
-	(lookedvars nil))
-    (values
-     (remove nil
-	     (maplist (lambda (current-code)
-			(let ((inst (car current-code)))
-			  (case (car inst)
-			    ((get-variable-temporary
-			      get-value-temporary)
-			     (pushnew (cadr inst) lookedvars)
-			     (pushnew (caddr inst) lookedvars)
-			     inst)
-			    ((unify-variable-temporary
-			      unify-value-temporary
-			      unify-local-value-temporary)
-			     (pushnew (cadr inst) lookedvars)
-			     inst)
-			    ((put-variable-temporary
-			      put-value-temporary
-			      set-variable-temporary
-			      set-value-temporary
-			      set-local-value-temporary)
-			     (if (member (cadr inst) lookedvars)
-				 inst
-				 nil))
-			    (t inst))))
-		      code))
-     changed?)))
 
 ;;must be called before calling reallocate-registers!
 (defun set-unsafe-and-local! (code)
@@ -615,7 +652,7 @@
 	    unify-variable-permanent
 	    unify-value-permanent)
 	   (setf (gethash (cadr inst) permanent-lastgoal-table) body-num))
-	  ((call execute)
+	  ((call execute proceed)
 	   (incf body-num)))))
     (let ((body-num 0))
       (dolist (inst code)
@@ -690,23 +727,23 @@
 	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap))
 	   (unless (have-key? (cadr inst) permanent-state-table)
 	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap)))
-	  ((call execute)
+	  ((call execute proceed)
 	   (incf body-num)))))
     code))
 
 	
 
-(defun reallocate-registers! (code head body)
-  (let* ((arity-list (make-arity-list head body))
-	 (A-start (1+ (apply #'max arity-list)))
-	 (using-register-list (list nil)))
+(defun reallocate-registers! (code A-start arity-list)
+  (let ((using-register-list (list nil)))
     ;;collect temporary variables...
     	(dolist (inst code)
 	  (case (car inst)
 	    ((put-variable-temporary
 	      put-value-temporary
+	      put-list
 	      get-variable-temporary
 	      get-value-temporary
+	      get-list
 	      set-variable-temporary
 	      set-value-temporary
 	      set-local-value-temporary
@@ -715,7 +752,13 @@
 	      unify-local-value-temporary)
 	     (when (>= (cadr inst) A-start)
 	       (pushnew (cadr inst) (car using-register-list))))
-	    ((call execute)
+	    ((put-structure
+	      put-constant
+	      get-structure
+	      get-constant)
+	     (when (>= (caddr inst) A-start)
+	       (pushnew (caddr inst) (car using-register-list))))
+	    ((call execute proceed)
 	     (push nil using-register-list))))
 	(let ((reallocate-list
 	       (mapcar (lambda (clause-regs clause-arity)
@@ -737,31 +780,62 @@
 		unify-local-value-temporary)
 	       (awhen (assoc (cadr inst) (car reallocate-list))
 		 (setf (cadr inst) (cdr it))))
-	      ((call execute)
+	      ((put-structure
+		put-constant
+		get-structure
+		get-constant)
+	       (awhen (assoc (caddr inst) (car reallocate-list))
+		 (setf (caddr inst) (cdr it))))
+	      ((call execute proceed)
 	       (setq reallocate-list (cdr reallocate-list)))))
 	  code)))
+
+
+(defun remove-unnecessary-pair (code)
+  (let (perm-pair-list)
+    (remove nil
+	    (mapcar (lambda (inst)
+		      (case (car inst)
+			((get-variable-permanent
+			  get-value-permanent)
+			 (pushnew (cons (second inst) (third inst)) perm-pair-list)
+			 inst)
+			((put-variable-permanent
+			  put-value-permanent)
+			 (if (assoc (second inst) perm-pair-list)
+			     (if (eq (cdr (assoc (second inst) perm-pair-list)) (third inst))
+				 nil
+				 inst)
+			     inst))
+			((call execute proceed)
+			 (setq perm-pair-list nil)
+			 inst)
+			(t inst)))
+		    code))))
+
 	  
-(defun propagate-test ()
+(defun optimize-test ()
   (let ((clause (parse *standard-input*)))
     (multiple-value-bind (head body) (devide-head-body clause)
-      (let ((compiled (compile-clause clause)))
+      (let* ((arity-list (make-arity-list head body))
+	     (A-start (1+ (apply #'max arity-list)))
+	     (compiled (compile-clause clause)))
 	(print-wamcode compiled)
-	(format t "***************~%")
-	(multiple-value-bind (newcode changed?) (propagate! compiled)
+	(format t "<--optimize-->~%")
+	(let ((newcode (optimize-wamcode compiled A-start)))
 	  (print-wamcode newcode)
-	  (format t "***************~%")
-	  (multiple-value-bind (newcode changed?) (remove-unnecessary-code newcode)
+	  (format t "<--remove-unnecessary-->~%")
+	  (let ((newcode (remove-unnecessary-code newcode)))
 	    (print-wamcode newcode)
-	    (format t "***************~%")
-	    (multiple-value-bind (newcode changed?) (remove-uninitialized-variable newcode)
+	    (format t "<--set-unsafe-and-local-->~%")
+	    (let ((newcode (set-unsafe-and-local! newcode)))
 	      (print-wamcode newcode)
-	      (format t "***************~%")
-	      (let ((newcode (set-unsafe-and-local! newcode)))
+	      (format t "<--reallocate-registers-->~%")
+	      (let ((newcode (reallocate-registers! newcode A-start arity-list)))
 		(print-wamcode newcode)
-		(format t "***************~%")
-		(let ((newcode (reallocate-registers!  newcode head body)))
-		  (print-wamcode newcode)
-		changed?)))))))))
+		(format t "<--remove-unnecessary-pair-->~%")
+		(let ((newcode (remove-unnecessary-pair newcode)))
+		  (print-wamcode newcode))))))))))
     
   
 (defmacro cons-when (condition element list)
@@ -779,6 +853,61 @@
 					(t
 					 (cons clause nil)))
     (values head body)))
+
+
+(defun optimize-wamcode (code A-start)
+  (let (optimized-code (first-block? t) current-block)
+    (dolist (inst code)
+      (case (car inst)
+	((put-variable-temporary
+	  put-variable-permanent
+	  put-value-temporary
+	  put-value-permanent
+	  put-unsafe-value
+	  put-structure
+	  put-list
+	  put-constant
+	  set-variable-temporary
+	  set-variable-permanent
+	  set-value-temporary
+	  set-value-permanent
+	  set-local-value-temporary
+	  set-local-value-permanent
+	  set-constant
+	  set-void
+	  get-variable-temporary
+	  get-variable-permanent
+	  get-value-temporary
+	  get-value-permanent
+	  get-structure
+	  get-list
+	  get-constant
+	  unify-variable-temporary
+	  unify-variable-permanent
+	  unify-value-temporary
+	  unify-value-permanent
+	  unify-local-value-temporary
+	  unify-local-value-permanent
+	  unify-constant
+	  unify-void)
+	 (push inst current-block))
+	((allocate 
+	  deallocate)
+	 (setq optimized-code (append optimized-code (list inst))))
+	((call
+	  execute
+	  proceed)
+	 (setq optimized-code
+	       (append optimized-code
+		       (if first-block?
+			   (progn
+			     (setq first-block? nil)
+			     (optimize-head (reverse current-block) A-start))
+			   (optimize-body (reverse current-block) A-start))
+		       (list inst)))
+	 (setq current-block nil))))
+    optimized-code))
+
 
 (defun compile-clause (clause)
   (multiple-value-bind  (head body) (devide-head-body clause)
@@ -850,7 +979,7 @@
 							 (t (rplacd (assoc arg varstate-table) 'globalized)
 							    `(unify-variable-permanent ,(cdr vardata)))))))))
 					    ((listterm-p arg)
-					     (let ((tempvar (incf (first register-next))))
+					     (let ((tempvar (incf register-next)))
 					       (prog1
 						   `((unify-variable-temporary ,tempvar))
 						 (setq remaining-code
@@ -858,7 +987,7 @@
 							       `((get-list ,tempvar)
 								 ,@(compile-head-struct-args (cdr arg))))))))
 					    ((termp arg)
-					     (let ((tempvar (incf (first register-next))))
+					     (let ((tempvar (incf register-next)))
 					       (if (= (arity arg) 0)
 						   `((unify-constant ,(car arg)))
 						   (prog1
@@ -873,7 +1002,7 @@
 		     (mapcan (lambda (arg)
 			       (incf A)
 			       (cond ((anonymousvar-p arg)
-				      (let ((tempvar (incf (nth body-num register-next))))
+				      (let ((tempvar (incf register-next)))
 					`((put-variable-temporary ,tempvar ,A))))
 				     ((variablep arg)
 				      (let ((vardata (cdr (assoc arg assign-table))))
@@ -924,7 +1053,7 @@
 							 (t (rplacd (assoc arg varstate-table) 'globalized)
 							    `(set-variable-permanent ,(cdr vardata)))))))))
 					    ((listterm-p arg)
-					     (let ((tempvar (incf (nth body-num register-next))))
+					     (let ((tempvar (incf register-next)))
 					       (prog1
 						   `((set-value-temporary ,tempvar))
 						 (setq prep-code
@@ -932,7 +1061,7 @@
 							       `((put-list ,tempvar)
 								 ,@(compile-head-struct-args (cdr arg))))))))
 					    ((termp arg)
-					     (let ((tempvar (incf (nth body-num register-next))))
+					     (let ((tempvar (incf register-next)))
 					       (if (= (arity arg) 0)
 						   `((set-constant ,(car arg)))
 						   (prog1
@@ -946,17 +1075,18 @@
 		(deallocate-emitted nil))
 	    (cons-when have-permanent
 		       (list 'allocate) (append (compile-head-term head)
-						(mapcan (lambda (b remain)
-							  (incf body-num)
-							  (append (compile-body-term b body-num)
-								  (cons-when (and have-permanent (>= 0 remain) (not deallocate-emitted))
-									     (prog1 (list 'deallocate) (setf deallocate-emitted t))
-									     (list
-									      (if (= -1 remain)
-										  `(execute ,(cons (car b) (arity b)))
-										  `(call ,(cons (car b) (arity b)) ,remain))))))
-							       body remain-list)))))))))
-
+						(aif (mapcan (lambda (b remain)
+							       (incf body-num)
+							       (append (compile-body-term b body-num)
+								       (cons-when (and have-permanent (>= 0 remain) (not deallocate-emitted))
+										  (prog1 (list 'deallocate) (setf deallocate-emitted t))
+										  (list
+										   (if (= -1 remain)
+										       `(execute ,(cons (car b) (arity b)))
+										       `(call ,(cons (car b) (arity b)) ,remain))))))
+							     body remain-list)
+						     it (list (list 'proceed)))))))))))
+    
 
 
 #|
