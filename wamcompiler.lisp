@@ -32,6 +32,7 @@
 	  ((eq c #\|) '(vertical-bar))
 	  ((eq c #\,) (cons 'atom '|,|))
 	  ((eq c #\;) (cons 'atom '|;|))
+	  ((eq c #\!) (cons 'atom '|!|))
 	  ((digit-char-p c) (unread-char c s) (cons 'int (read-int s)))
 	  ((member c *non-alphanum-chars*)
 	   (unread-char c s) (read-non-alphanum-atom s))
@@ -320,12 +321,14 @@
 	(if (not (eq (car (next-token)) 'dot))
 	    (error "Syntax error! (arity error)") result)))))
 
+
+(defmacro arity (term) `(length (cdr ,term)))
+
 (defmacro variablep (x) `(atom ,x))
 (defmacro anonymousvar-p (x) `(eq ,x '|_|))
 (defmacro termp (x) `(listp ,x))
 (defmacro listterm-p (x) `(and (listp ,x) (eq (car ,x) '|.|)))
-
-(defmacro arity (term) `(length (cdr ,term)))
+(defmacro cut-operator-p (x) `(and (listp ,x) (eq (car ,x) '|!|) (= (arity ,x) 0)))
 
 
 (defun flatten-comma (tree)
@@ -335,6 +338,7 @@
 
 (defun collect-vars (goal)
   (cond ((variablep goal) (list goal))
+	((cut-operator-p goal) (list '|!|))
 	((termp goal) (mapcan #'collect-vars (cdr goal)))
 	(t nil)))
 
@@ -346,7 +350,9 @@
       (dolist (v (collect-vars g))
 	(if (assoc v tbl)
 	    (rplacd (assoc v tbl) (cons (cadr (assoc v tbl)) cnt))
-	    (setq tbl (cons (cons v (cons cnt cnt)) tbl))))
+	    (if (eq v '|!|)
+		(setq tbl (cons (cons v (cons 0 cnt)) tbl))
+		(setq tbl (cons (cons v (cons cnt cnt)) tbl)))))
       (incf cnt))
     tbl))
 
@@ -365,15 +371,19 @@
 	 (arity-list (make-arity-list head body))
 	 (A-counter (apply #'max arity-list))
 	 (postbl
-	  (make-varposition-table (cons (head-firstbody-conj head body) (cdr body))))
+	  (remove-if
+	   (lambda (vardata)
+	     (and (eq (car vardata) '|!|) (= (cddr vardata) 0)))
+	   (make-varposition-table (cons (head-firstbody-conj head body) (cdr body)))))
 	 (sorted-tbl (sort postbl (lambda (x y) (> (cddr x) (cddr y)))))
 	 (assigned-tbl
-	  (mapcar (lambda (v)
-		    (let ((var (car v))
-			  (first-appear (cadr v)) (last-appear (cddr v)))
-		      (if (= first-appear last-appear)
-			  (cons var (cons 'temporary (incf A-counter)))
-			  (cons var (cons 'permanent (incf Y-counter)))))) sorted-tbl))
+	  (mapcar
+	   (lambda (v)
+	     (let ((var (car v))
+		   (first-appear (cadr v)) (last-appear (cddr v)))
+	       (if (= first-appear last-appear)
+		   (cons var (cons 'temporary (incf A-counter)))
+		   (cons var (cons 'permanent (incf Y-counter)))))) sorted-tbl))
 	 (remain-list (make-list (length body) :initial-element 0)))
     ;;make remain-list
     (dolist (v sorted-tbl)
@@ -659,13 +669,13 @@
 	   (occur-temporary (second inst)))
 	  (put-structure
 	   (when (x? (third inst))
-	       (occur-temporary (third inst))))
+	     (occur-temporary (third inst))))
 	  (put-list
 	   (when (x? (second inst))
-	       (occur-temporary (second inst))))
+	     (occur-temporary (second inst))))
 	  (put-constant
 	   (when (x? (third inst))
-	       (occur-temporary (third inst))))
+	     (occur-temporary (third inst))))
 	  ((get-variable-temporary
 	    get-value-temporary)
 	   (occur-temporary (second inst)))
@@ -674,22 +684,22 @@
 	     (occur-temporary (third inst))))
 	  (get-list
 	   (when (x? (second inst))
-	       (occur-temporary (second inst))))
+	     (occur-temporary (second inst))))
 	  (get-constant
 	   (when (x? (third inst))
-	       (occur-temporary (third inst))))
+	     (occur-temporary (third inst))))
 	  (set-variable-temporary
 	   (when (x? (second inst))
-	       (occur-temporary (second inst))))
+	     (occur-temporary (second inst))))
 	  (set-value-temporary
 	   (when (x? (second inst))
-	       (occur-temporary (second inst))))
+	     (occur-temporary (second inst))))
 	  (unify-variable-temporary
 	   (when (x? (second inst))
-	       (occur-temporary (second inst))))
+	     (occur-temporary (second inst))))
 	  (unify-value-temporary
 	   (when (x? (second inst))
-	       (occur-temporary (second inst))))))
+	     (occur-temporary (second inst))))))
       (mapcar #'car (remove-if (lambda (pair) (> (cdr pair) 1)) temporary-occur-alist)))))
 
 
@@ -975,37 +985,6 @@
 	       (progn
 		 (push-void-if-possible)
 		 (push inst current-block))))
-	  ((put-variable-temporary
-	    put-variable-permanent
-	    put-value-temporary
-	    put-value-permanent
-	    put-unsafe-value
-	    put-structure
-	    put-list
-	    put-constant
-	    set-variable-permanent
-	    set-value-temporary
-	    set-value-permanent
-	    set-local-value-temporary
-	    set-local-value-permanent
-	    set-constant
-	    get-variable-temporary
-	    get-variable-permanent
-	    get-value-temporary
-	    get-value-permanent
-	    get-structure
-	    get-list
-	    get-constant
-	    unify-variable-permanent
-	    unify-value-temporary
-	    unify-value-permanent
-	    unify-local-value-temporary
-	    unify-local-value-permanent
-	    unify-constant
-	    allocate
-	    deallocate)
-	   (push-void-if-possible)
-	   (push inst current-block))
 	  ((set-void unify-void)
 	   (setq void-type (car inst))
 	   (incf void-counter))
@@ -1019,7 +998,10 @@
 			       (optimize-head (reverse current-block) A-start))
 			     (optimize-body (reverse current-block) A-start))
 			 (list inst)))
-	   (setq current-block nil))))
+	   (setq current-block nil))
+	  (t
+	   (push-void-if-possible)
+	   (push inst current-block))))
       optimized-code)))
 
 
@@ -1070,8 +1052,8 @@
 		 (nconc main-code remaining-code)))
 	     (compile-head-struct-args (struct-args)
 	       (let* ((remaining-code nil)
-		 ;;code-list for nested structure
-		 ;; which must be put after unification of parent structure
+		      ;;code-list for nested structure
+		      ;; which must be put after unification of parent structure
 		      (main-code
 		       (mapcan
 			(lambda (arg)
@@ -1118,41 +1100,42 @@
 		 (values main-code remaining-code)))
 	     (compile-body-term (term)
 	       (let* ((A 0) (prep-code nil)
-		 (main-code (mapcan
-			     (lambda (arg)
-			       (incf A)
-			       (cond ((anonymousvar-p arg)
-				      (let ((tempvar (incf register-next)))
-					`((put-variable-temporary ,tempvar ,A))))
-				     ((variablep arg)
-				      (let ((vardata (cdr (assoc arg assign-table))))
-					(list
-					 (case (car vardata)
-					   (temporary
-					    (if (initialized-p arg)
-						`(put-value-temporary ,(cdr vardata) ,A)
-						(prog1 `(put-variable-temporary ,(cdr vardata) ,A)
-						  (pushnew arg initialized-vars))))
-					   (permanent
-					    (if (initialized-p arg)
-						`(put-value-permanent ,(cdr vardata) ,A)
-						(prog1 `(put-variable-permanent ,(cdr vardata) ,A)
-						  (pushnew arg initialized-vars))))))))
-				     ((listterm-p arg)
-				      `((put-list ,A)
-					,@(multiple-value-bind
-					   (m p) (compile-body-struct-args (cdr arg))
-					   (setq prep-code (append prep-code p))
-					  m)))
-				     ((termp arg)
-				      (if (= (arity arg) 0)
-					  `((put-constant ,(car arg) ,A))
-					  `((put-structure ,(cons (car arg) (arity arg)) ,A)
-					    ,@(multiple-value-bind
-					       (m p) (compile-body-struct-args (cdr arg))
-					       (setq prep-code (append prep-code p))
-					       m))))))
-			     (cdr term))))
+		      (main-code
+		       (mapcan
+			(lambda (arg)
+			  (incf A)
+			  (cond ((anonymousvar-p arg)
+				 (let ((tempvar (incf register-next)))
+				   `((put-variable-temporary ,tempvar ,A))))
+				((variablep arg)
+				 (let ((vardata (cdr (assoc arg assign-table))))
+				   (list
+				    (case (car vardata)
+				      (temporary
+				       (if (initialized-p arg)
+					   `(put-value-temporary ,(cdr vardata) ,A)
+					   (prog1 `(put-variable-temporary ,(cdr vardata) ,A)
+					     (pushnew arg initialized-vars))))
+				      (permanent
+				       (if (initialized-p arg)
+					   `(put-value-permanent ,(cdr vardata) ,A)
+					   (prog1 `(put-variable-permanent ,(cdr vardata) ,A)
+					     (pushnew arg initialized-vars))))))))
+				((listterm-p arg)
+				 `((put-list ,A)
+				   ,@(multiple-value-bind
+				      (m p) (compile-body-struct-args (cdr arg))
+				      (setq prep-code (append prep-code p))
+				      m)))
+				((termp arg)
+				 (if (= (arity arg) 0)
+				     `((put-constant ,(car arg) ,A))
+				     `((put-structure ,(cons (car arg) (arity arg)) ,A)
+				       ,@(multiple-value-bind
+					  (m p) (compile-body-struct-args (cdr arg))
+					  (setq prep-code (append prep-code p))
+					  m))))))
+			(cdr term))))
 		 (nconc prep-code main-code)))
 	     (compile-body-struct-args (struct-args)
 	       (let* ((prep-code nil)
@@ -1196,35 +1179,49 @@
 					  (append
 					   prep-code
 					   (multiple-value-bind
-						   (m p) (compile-body-struct-args (cdr arg))
+						 (m p) (compile-body-struct-args (cdr arg))
 					     `(,@p
 					       (put-structure
 						,(cons (car arg) (arity arg)) ,tempvar)
 					       ,@m))))))))))
 			struct-args)))
 		 (values main-code prep-code))))
-	  (let ((have-permanent (some #'plusp remain-list)) (body-num -1)
+	  (let ((have-permanent (some #'plusp remain-list))
+		(have-deep-cut (assoc '|!| assign-table))
+		(body-num -1)
 		(deallocate-emitted nil))
-	    (cons-when have-permanent
-		       (list 'allocate)
+	    (cons-when
+	     have-permanent
+	     (list 'allocate)
+	     (cons-when
+	      have-deep-cut
+	      (list 'get-level (cddr (assoc '|!| assign-table)))
+	      (append
+	       (compile-head-term head)
+	       (aif (mapcan
+		     (lambda (b remain)
+		       (incf body-num)
 		       (append
-			(compile-head-term head)
-			(aif (mapcan
-			      (lambda (b remain)
-				(incf body-num)
-				(append
-				 (compile-body-term b)
-				 (cons-when
-				  (and have-permanent (>= 0 remain)
-				       (not deallocate-emitted))
-				  (prog1 (list 'deallocate)
-				    (setf deallocate-emitted t))
-				  (list
-				   (if (= -1 remain)
-				       `(execute ,(cons (car b) (arity b)))
-				       `(call ,(cons (car b) (arity b)) ,remain))))))
-			      body remain-list)
-			     it (list (list 'proceed)))))))))))
+			(compile-body-term b)
+			(let ((deallocate-part
+			       (when (and have-permanent (>= 0 remain) (not deallocate-emitted))
+				 (setf deallocate-emitted t)
+				 (list (list 'deallocate)))))
+			   (cond
+			     ((cut-operator-p b)
+			      (append
+			       (if (= body-num 0)
+				   (list (list 'neck-cut))
+				   `((cut ,(cddr (assoc '|!| assign-table)))))
+			       deallocate-part))
+			     ((= -1 remain)
+			      (append deallocate-part
+				      `((execute ,(cons (car b) (arity b))))))
+			     (t
+			      (append deallocate-part
+				      `((call ,(cons (car b) (arity b)) ,remain))))))))
+		     body remain-list)
+		    it (list (list 'proceed))))))))))))
 
 
 
