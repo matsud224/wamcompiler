@@ -36,13 +36,13 @@ execute p
 proceed
 try-me-else l
 retry-me-else l
-trust-me n
+trust-me
 try l
 retry l
 trust l
 switch-on-term v,c,l,s
-switch-on-constant alist
-switch-on-structure alist
+switch-on-constant hashtable
+switch-on-structure hashtable
 neck-cut
 get-level y
 cut y

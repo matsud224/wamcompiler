@@ -1366,19 +1366,15 @@
 				    (setq next-label (gensym)) `(retry-me-else ,next-label)))
 			     (cons
 			      (let ((arg-1 (car s)) (new-label (gensym)))
-				(format t "arg-1=>~A  (" arg-1)
 				(cond
 				  ((listterm-p arg-1)
 				   ;;list
-				   (format t "list)~%")
 				   (setq list-label-list (append list-label-list (list new-label))))
 				  ((and (termp arg-1) (= (arity arg-1) 0))
 				   ;;constant
-				   (format t "constant)~%")
 				   (append-hash (car arg-1) new-label constant-label-table))
 				  (t
 				   ;;structure
-				   (format t "structure)~%")
 				   (append-hash
 				    (cons (car arg-1) (arity arg-1))
 				    new-label struct-label-table)))
@@ -1389,37 +1385,73 @@
 	       entrance constant-label-table list-label-list struct-label-table)))
 	(nconc indexing-code main-code))))
 
+(defun set-label-pointer! (code)
+  (let ((label-ptr-table (make-hash-table :test #'eq)))
+    (mapl (lambda (part)
+	    (when (eq (caar part) 'label)
+	      (setf (gethash (cadar  part) label-ptr-table) (cdr part)))) code)
+    (mapc (lambda (inst)
+	    (case (car inst)
+	      ((try-me-else
+		retry-me-else
+		try
+		retry
+		trust)
+	       (nconc inst (list (gethash (second inst) label-ptr-table))))
+	      (switch-on-term
+	       (when (eq 'fail (second inst))
+		 (nconc inst (list (gethash (second inst) label-ptr-table))))
+	       (when (eq 'fail (third inst))
+		 (nconc inst (list (gethash (third inst) label-ptr-table))))
+	       (when (eq 'fail (fourth inst))
+		 (nconc inst (list (gethash (fourth inst) label-ptr-table))))
+	       (when (eq 'fail (fifth inst))
+		 (nconc inst (list (gethash (fifth inst) label-ptr-table)))))
+	      (switch-on-constant
+	       (let ((new-table (make-hash-table :test #'eq)))
+		 (maphash
+		  (lambda (k v)
+		    (setf (gethash k new-table) (gethash v label-ptr-table))) (second inst))
+		 (nconc inst (list new-table)))) 
+	      (switch-on-structure
+	       (let ((new-table (make-hash-table :test #'equal)))
+		 (maphash
+		  (lambda (k v)
+		    (setf (gethash k new-table) (gethash v label-ptr-table))) (second inst))
+		 (nconc inst (list new-table)))))) code))) 
+
 
 (defun compile-dispatching-code (key)
-  (let ((subsequence-list nil)
-	(current-subsequence nil))
-    (dolist (pair (gethash key *clause-code-table*))
-      (if (or (variablep (car pair)) (null (car pair)))
-	  (progn
-	    (when current-subsequence
-	      (push (reverse current-subsequence) subsequence-list)
-	      (setq current-subsequence nil))
-	    (push (list pair) subsequence-list))
-	  (push pair current-subsequence)))
-    (when current-subsequence
-      (push (reverse current-subsequence) subsequence-list))
-    (setq subsequence-list (reverse subsequence-list))
-    (if (= (length subsequence-list) 1)
-	(compile-subsequence (car subsequence-list))
-	(let ((subseq-count (length subsequence-list))
-	      (next-label nil) (counter 0))
-	  (mapcan (lambda (s)
-		    (incf counter)
-		    (cons-when next-label
-			       `(label ,next-label)
-			       (cons
-				(cond ((= counter 1)
-				       (setq next-label (gensym)) `(try-me-else ,next-label))
-				      ((= counter subseq-count)
-				       (list 'trust-me))
-				      (t
-				       (setq next-label (gensym)) `(retry-me-else ,next-label)))
-				(compile-subsequence s)))) subsequence-list)))))
+  (set-label-pointer!
+   (let ((subsequence-list nil)
+	 (current-subsequence nil))
+     (dolist (pair (gethash key *clause-code-table*))
+       (if (or (variablep (car pair)) (null (car pair)))
+	   (progn
+	     (when current-subsequence
+	       (push (reverse current-subsequence) subsequence-list)
+	       (setq current-subsequence nil))
+	     (push (list pair) subsequence-list))
+	   (push pair current-subsequence)))
+     (when current-subsequence
+       (push (reverse current-subsequence) subsequence-list))
+     (setq subsequence-list (reverse subsequence-list))
+     (if (= (length subsequence-list) 1)
+	 (compile-subsequence (car subsequence-list))
+	 (let ((subseq-count (length subsequence-list))
+	       (next-label nil) (counter 0))
+	   (mapcan (lambda (s)
+		     (incf counter)
+		     (cons-when next-label
+				`(label ,next-label)
+				(cons
+				 (cond ((= counter 1)
+					(setq next-label (gensym)) `(try-me-else ,next-label))
+				       ((= counter subseq-count)
+					(list 'trust-me))
+				       (t
+					(setq next-label (gensym)) `(retry-me-else ,next-label)))
+				 (compile-subsequence s)))) subsequence-list))))))
 
 (defun repl ()
   (loop
@@ -1458,8 +1490,8 @@ stack: -1,-3,-5,...
 heap: -2,-4,-6,...
 |#
 
-(defconstant *bottom-of-stack* -1)
-(defconstant *bottom-of-heap* -2)
+(defconstant bottom-of-stack -1)
+(defconstant bottom-of-heap -2)
 
 (deftype stack-address ()
   '(and (satisfies minusp) (satisfies oddp)))
@@ -1469,6 +1501,16 @@ heap: -2,-4,-6,...
 
 (deftype register-number ()
   '(and (integer 1 *)))
+
+
+(defun addr+ (target &rest nums)
+  (+ target (* -2 (apply #'+ nums))))
+
+(defun addr< (addr1 addr2)
+  (cond
+    ((and (typep addr1 'stack-address) (typep addr2 'heap-address)) nil)
+    ((and (typep addr1 'heap-address) (typep addr1 'stack-address)) t)
+    (t (> addr1 addr2))))
 
 (defun store (addr)
   (declare (special stack-area heap-area register-area))
@@ -1524,33 +1566,33 @@ heap: -2,-4,-6,...
   (declare (special stack-area E))
   (setf (aref stack-area (- (addr+ E y 1))) new-val))
 
+(defmacro while (condition &body body)
+  `(loop
+      (unless ,condition (return))
+      ,@body))
+
 
 (defun make-machine ()
   (let* ((register-area (make-array 10 :adjustable t))
 	 (heap-area (make-array 30 :adjustable t))
 	 (stack-area (make-array 50 :adjustable t))
-	 (trail-area (make-array 20 :adjustable t)) (pdl)
+	 (trail-area (make-array 20 :adjustable t))
+	 (pdl nil)
 	 (P) (CP) (S) (HB) (H) (B0) (B) (E) (TR) (fail) (num-of-args))
+    (declare (ignore register-area heap-area stack-area trail-area pdl))
     (lambda (query-code)
       (setq P query-code)
       (macrolet
 	  ((backtrack-or-continue ()
 	     '(if fail (backtrack) (incf P))))
 	(labels
-	    ((addr+ (target &rest nums)
-	       (+ target (* -2 (apply #'+ nums))))
-	     (addr< (addr1 addr2)
-	       (cond
-		 ((and (typep addr1 'stack-address) (typep addr2 'heap-address)) nil)
-		 ((and (typep addr1 'heap-address) (typep addr1 'stack-address)) t)
-		 (t (> addr1 addr2))))
-	     (dereference (a)
+	    ((dereference (a)
 	       (destructuring-bind (tag . value) (store a)
 		 (if (and (eq tag 'ref) (/= value a))
 		     (dereference value)
 		     a)))
 	     (backtrack ()
-	       (if (eq B *bottom-of-stack*)
+	       (if (eq B bottom-of-stack)
 		   (print "no.")
 		   (progn (setf B0 (stack (addr+ B (stack B) 7)))
 			  (setf P (stack (addr+ B (stack B) 4))))))
@@ -1570,11 +1612,22 @@ heap: -2,-4,-6,...
 	     (unwind-trail (a1 a2)
 	       (loop for i from a1 to (1- a2) do
 		    (setf (store (trail i)) (cons 'ref (trail i)))))
+	     (tidy-trail ()
+	       (let ((i (stack (addr+ B (stack B) 5))))
+		 (while (< i TR)
+		   (if (or (addr< (trail i) HB) (and (addr< H (trail i)) (addr< (trail i) B)))
+		       (incf i)
+		       (progn (setf (trail i) (trail (1- TR)))
+			      (decf TR))))))
+	     (defined (p)
+	       (if (gethash p *dispatching-code-table*)
+		   t
+		   nil))
 	     (unify (a1 a2)
 	       (declare (special fail))
 	       (let ((pdl nil))
 		 (push a1 pdl) (push a2 pdl) (setq fail nil)
-		 (loop while (not (null pdl) fail) do
+		 (loop while (not (or (null pdl) fail)) do
 		      (let ((d1 (dereference (pop pdl))) (d2 (dereference (pop pdl))))
 			(when (/= d1 d2)
 			  (destructuring-bind
@@ -1614,9 +1667,10 @@ heap: -2,-4,-6,...
 					     (setf (register a) (heap H))
 					     (setf H (addr+ H 1))
 					     (incf P)))
-		   (put-variable-permanent (let ((y (cadr inst)) (a (caddr inst)))
+		   (put-variable-permanent (let* ((y (cadr inst)) (a (caddr inst))
+						  (addr (addr+ E y 1)))
 					     (setf (stackvar y) (cons 'ref addr))
-					     (setf (register a) (stackvar y))
+					     (setf (register a) (stack addr))
 					     (incf P)))
 		   (put-value-temporary (let ((x (cadr inst)) (a (caddr inst)))
 					  (setf (register a) (register x))
@@ -1689,7 +1743,7 @@ heap: -2,-4,-6,...
 				   (incf P)))
 		   (set-void (let ((n (cadr inst)))
 			       (dotimes (i n)
-				 (setf (heap (addr+ H i) (cons 'ref (addr+ H i)))))
+				 (setf (heap (addr+ H i)) (cons 'ref (addr+ H i))))
 			       (setf H (addr+ H n))
 			       (incf P)))
 		   (get-variable-temporary
@@ -1814,7 +1868,7 @@ heap: -2,-4,-6,...
 			(read (let ((addr (dereference S)))
 				(case (car (store addr))
 				  (ref (setf (store addr) (cons 'con c)))
-				  (con (if (not (eq (cdr (store addr) c)))
+				  (con (if (not (eq (cdr (store addr)) c))
 					   (setq fail t)))
 				  (t (setq fail t)))))
 			(write (setf (heap H) (cons 'con c))
@@ -1825,7 +1879,7 @@ heap: -2,-4,-6,...
 		      (case mode
 			(read (setf S (addr+ S n)))
 			(write (dotimes (i n)
-				 (setf (heap (addr+ H i) (cons 'ref (addr+ H i)))))
+				 (setf (heap (addr+ H i)) (cons 'ref (addr+ H i))))
 			       (setf H (addr+ H n))))
 		      (incf P)))
 		   (allocate
@@ -1852,7 +1906,7 @@ heap: -2,-4,-6,...
 			      (if (defined p)
 				  (progn (setf num-of-args (arity p))
 					 (setf B0 B)
-					 (setf P (code p)))
+					 (setf P (code-address p)))
 				  (backtrack))))
 		   (proceed
 		    (setf P CP))
@@ -1865,17 +1919,17 @@ heap: -2,-4,-6,...
 			   (n (stack new-B)))
 		      (setf (stack new-B) num-of-args)
 		      (dotimes (i n)
-			(setf (stack (addr+ new-B (1+ i)) (register (1+ i)))))
-		      (setf (stack (addr+ new-B n 1)) E)
-		      (setf (stack (addr+ new-B n 2)) CP)
-		      (setf (stack (addr+ new-B n 3)) B)
-		      (setf (stack (addr+ new-B n 4)) l)
-		      (setf (stack (addr+ new-B n 5)) TR)
-		      (setf (stack (addr+ new-B n 6)) H)
-		      (setf (stack (addr+ new-B n 7)) B0)
-		      (setf B new-B)
-		      (setf HB H)
-		      (incf P)))
+			(setf (stack (addr+ new-B (1+ i))) (register (1+ i)))))
+		    (setf (stack (addr+ new-B n 1)) E)
+		    (setf (stack (addr+ new-B n 2)) CP)
+		    (setf (stack (addr+ new-B n 3)) B)
+		    (setf (stack (addr+ new-B n 4)) l)
+		    (setf (stack (addr+ new-B n 5)) TR)
+		    (setf (stack (addr+ new-B n 6)) H)
+		    (setf (stack (addr+ new-B n 7)) B0)
+		    (setf B new-B)
+		    (setf HB H)
+		    (incf P))
 		   (retry-me-else
 		    (let ((l (cadr inst))
 			  (n (stack B)))
@@ -1951,23 +2005,31 @@ heap: -2,-4,-6,...
 				       (lis (setf P l))
 				       (struct (setf P s)))))
 		   (switch-on-constant
-		    (let* ((alist (cadr inst))
+		    (let* ((ht (cadr inst))
 			   (val (cdr (store (dereference (register 1)))))
-			   (result (assoc val alist)))
+			   (result (gethash val ht)))
 		      (if result
-			  (setf P (cdr result))
+			  (setf P result)
 			  (backtrack))))
 		   (switch-on-structure
-		    (let ((alist (cadr inst))
-			  (val (cdr (store (dereference (register 1)))))
-			  (result (assoc val alist)))
+		    (let* ((ht (cadr inst))
+			   (val (cdr (store (dereference (register 1)))))
+			   (result (gethash val ht)))
 		      (if result
-			  (setf P (cdr result))
+			  (setf P result)
 			  (backtrack))))
-		   (neck-cut (error "not implemented"))
+		   (neck-cut (when (addr< B0 B)
+			       (setq B B0)
+			       (tidy-trail))
+			     (incf P)) 
 		   (get-level (let ((y (cadr inst)))
-				(error "not implemented")))
+				(setf (stack (addr+ E 2 y)) B0)))
 		   (cut (let ((y (cadr inst)))
-			  (error "not implemented")))
+			  (when (addr< (stack (addr+ E 2 y)) B)
+			    (setf B (stack (addr+ E 2 y)))
+			    (tidy-trail))
+			  (incf P)))
+		   (label ;;pass
+		    (incf P))
 		   (otherwise (error "unknown instruction!")))))))))))
 
