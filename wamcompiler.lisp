@@ -6,7 +6,8 @@
 ;;			  :executable t)
 
 (defvar *operator-list* nil)
-
+(defvar *clause-code-table* (make-hash-table :test #'equal)) ;; key (functor . arity). 
+(defvar *dispatching-code-table* (make-hash-table :test #'equal))
 
 (defmacro op-atom (x) `(car ,x))
 (defmacro op-prec (x) `(cadr ,x))
@@ -407,106 +408,120 @@
   (let ((expr (parse *standard-input*)))
     (print-wamcode (compile-clause expr))))
 
+(defun print-hashtable (ht)
+  (princ "{")
+  (let ((counter 0) (len (hash-table-count ht)))
+    (maphash (lambda (k v)
+	       (incf counter)
+	       (if (consp k)
+		   (format t "~A/~A => ~A" (car k) (cdr k) v)
+		   (format t "~A => ~A" k v))
+	       (when (/= counter len)
+		 (princ ", "))) ht)
+    (princ "}")))
+
 (defun print-wamcode (code)
   (dolist (inst code)
     (case (car inst)
       (put-variable-temporary
-       (format t "put-variable X~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tput-variable X~A,A~A~%" (cadr inst) (caddr inst)))
       (put-variable-permanent
-       (format t "put-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tput-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
       (put-value-temporary
-       (format t "put-value X~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tput-value X~A,A~A~%" (cadr inst) (caddr inst)))
       (put-value-permanent
-       (format t "put-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tput-value Y~A,A~A~%" (cadr inst) (caddr inst)))
       (put-unsafe-value
-       (format t "put-unsafe-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tput-unsafe-value Y~A,A~A~%" (cadr inst) (caddr inst)))
       (put-structure
-       (format t "put-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+       (format t "~10Tput-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
       (put-list
-       (format t "put-list A~A~%" (cadr inst)))
+       (format t "~10Tput-list A~A~%" (cadr inst)))
       (put-constant
-       (format t "put-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tput-constant ~A,A~A~%" (cadr inst) (caddr inst)))
       (set-variable-temporary
-       (format t "set-variable X~A~%" (cadr inst)))
+       (format t "~10Tset-variable X~A~%" (cadr inst)))
       (set-variable-permanent
-       (format t "set-variable Y~A~%" (cadr inst)))
+       (format t "~10Tset-variable Y~A~%" (cadr inst)))
       (set-value-temporary
-       (format t "set-value X~A~%" (cadr inst)))
+       (format t "~10Tset-value X~A~%" (cadr inst)))
       (set-value-permanent
-       (format t "set-value Y~A~%" (cadr inst)))
+       (format t "~10Tset-value Y~A~%" (cadr inst)))
       (set-local-value-temporary
-       (format t "set-local-value X~A~%" (cadr inst)))
+       (format t "~10Tset-local-value X~A~%" (cadr inst)))
       (set-local-value-permanent
-       (format t "set-local-value Y~A~%" (cadr inst)))
+       (format t "~10Tset-local-value Y~A~%" (cadr inst)))
       (set-constant
-       (format t "set-constant ~A~%" (cadr inst)))
+       (format t "~10Tset-constant ~A~%" (cadr inst)))
       (set-void
-       (format t "set-void ~A~%" (cadr inst)))
+       (format t "~10Tset-void ~A~%" (cadr inst)))
       (get-variable-temporary
-       (format t "get-variable X~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tget-variable X~A,A~A~%" (cadr inst) (caddr inst)))
       (get-variable-permanent
-       (format t "get-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tget-variable Y~A,A~A~%" (cadr inst) (caddr inst)))
       (get-value-temporary
-       (format t "get-value X~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tget-value X~A,A~A~%" (cadr inst) (caddr inst)))
       (get-value-permanent
-       (format t "get-value Y~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tget-value Y~A,A~A~%" (cadr inst) (caddr inst)))
       (get-structure
-       (format t "get-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+       (format t "~10Tget-structure ~A/~A,A~A~%" (caadr inst) (cdadr inst) (caddr inst)))
       (get-list
-       (format t "get-list A~A~%" (cadr inst)))
+       (format t "~10Tget-list A~A~%" (cadr inst)))
       (get-constant
-       (format t "get-constant ~A,A~A~%" (cadr inst) (caddr inst)))
+       (format t "~10Tget-constant ~A,A~A~%" (cadr inst) (caddr inst)))
       (unify-variable-temporary
-       (format t "unify-variable X~A~%" (cadr inst)))
+       (format t "~10Tunify-variable X~A~%" (cadr inst)))
       (unify-variable-permanent
-       (format t "unify-variable Y~A~%" (cadr inst)))
+       (format t "~10Tunify-variable Y~A~%" (cadr inst)))
       (unify-value-temporary
-       (format t "unify-value X~A~%" (cadr inst)))
+       (format t "~10Tunify-value X~A~%" (cadr inst)))
       (unify-value-permanent
-       (format t "unify-value Y~A~%" (cadr inst)))
+       (format t "~10Tunify-value Y~A~%" (cadr inst)))
       (unify-local-value-temporary
-       (format t "unify-local-value X~A~%" (cadr inst)))
+       (format t "~10Tunify-local-value X~A~%" (cadr inst)))
       (unify-local-value-permanent
-       (format t "unify-local-value Y~A~%" (cadr inst)))
+       (format t "~10Tunify-local-value Y~A~%" (cadr inst)))
       (unify-constant
-       (format t "unify-constant ~A~%" (cadr inst)))
+       (format t "~10Tunify-constant ~A~%" (cadr inst)))
       (unify-void
-       (format t "unify-void ~A~%" (cadr inst)))
+       (format t "~10Tunify-void ~A~%" (cadr inst)))
       (allocate
-       (format t "allocate~%"))
+       (format t "~10Tallocate~%"))
       (deallocate
-       (format t "deallocate~%"))
+       (format t "~10Tdeallocate~%"))
       (call
-       (format t "call ~A/~A,~A~%" (caadr inst) (cdadr inst) (caddr inst)))
+       (format t "~10Tcall ~A/~A,~A~%" (caadr inst) (cdadr inst) (caddr inst)))
       (execute
-       (format t "execute ~A/~A~%" (caadr inst) (cdadr inst)))
+       (format t "~10Texecute ~A/~A~%" (caadr inst) (cdadr inst)))
       (proceed
-       (format t "proceed~%"))
+       (format t "~10Tproceed~%"))
       (try-me-else
-       (format t "try-me-else ~A~%" (cadr inst)))
+       (format t "~10Ttry-me-else ~A~%" (cadr inst)))
       (retry-me-else
-       (format t "retry-me-else ~A~%" (cadr inst)))
+       (format t "~10Tretry-me-else ~A~%" (cadr inst)))
       (trust-me
-       (format t "trust-me ~A~%" (cadr inst)))
+       (format t "~10Ttrust-me~%"))
       (try
-       (format t "try ~A~%" (cadr inst)))
+       (format t "~10Ttry ~A~%" (cadr inst)))
       (retry
-       (format t "retry ~A~%" (cadr inst)))
+       (format t "~10Tretry ~A~%" (cadr inst)))
       (trust
-       (format t "trust ~A~%" (cadr inst)))
+       (format t "~10Ttrust ~A~%" (cadr inst)))
       (switch-on-term
-       (format t "switch-on-term ~A,~A,~A,~A~%"
+       (format t "~10Tswitch-on-term ~A,~A,~A,~A~%"
 	       (cadr inst) (caddr inst) (cadddr inst) (car (cddddr inst))))
       (switch-on-constant
-       (format t "switch-on-constant ~A~%" (cadr inst)))
+       (format t "~10Tswitch-on-constant ") (print-hashtable (cadr inst)) (princ #\Newline))
       (switch-on-structure
-       (format t "switch-on-structure ~A~%" (cadr inst)))
+       (format t "~10Tswitch-on-structure ") (print-hashtable (cadr inst)) (princ #\Newline))
       (neck-cut
-       (format t "neck-cut~%"))
+       (format t "~10Tneck-cut~%"))
       (get-level
-       (format t "get-level Y~A~%" (cadr inst)))
+       (format t "~10Tget-level Y~A~%" (cadr inst)))
       (cut
-       (format t "cut Y~A~%" (cadr inst)))
+       (format t "~10Tcut Y~A~%" (cadr inst)))
+      (label
+       (format t "~A:" (cadr inst)))
       (t (error (format nil "Unknown instruction (~A)" (car inst)))))))
 
 
@@ -927,7 +942,7 @@
 	(format t "<--optimize-->~%")
 	(let ((newcode (optimize-wamcode compiled A-start)))
 	  (print-wamcode newcode)
-	  (format t "<--remove-unnecessary-->~%")
+	  (format t "<--remove-unnecessary-code-->~%")
 	  (let ((newcode (remove-unnecessary-code newcode)))
 	    (print-wamcode newcode)
 	    (format t "<--set-unsafe-and-local-->~%")
@@ -948,15 +963,16 @@
 
 (defun devide-head-body (clause)
   (destructuring-bind
-	(head . body) (cond
-			((and (eq (car clause) '|:-|) (= (arity clause) 2))
-			 (cons (cadr clause) (flatten-comma (caddr clause))))
-			((and (eq (car clause) '|:-|) (= (arity clause) 1))
-			 (cons nil (flatten-comma (cadr clause))))
-			((and (eq (car clause) '|?-|) (= (arity clause) 1))
-			 (cons nil (flatten-comma (cadr clause))))
-			(t (cons clause nil)))
-    (values head body)))
+	(head body clause-type) (cond
+				  ((and (eq (car clause) '|:-|) (= (arity clause) 2))
+				   (list (cadr clause) (flatten-comma (caddr clause)) 'rule))
+				  ((and (eq (car clause) '|:-|) (= (arity clause) 1))
+				   (list nil (flatten-comma (cadr clause)) 'call))
+				  ((and (eq (car clause) '|?-|) (= (arity clause) 1))
+				   (list nil (flatten-comma (cadr clause)) 'question))
+				  (t
+				   (list clause nil 'fact)))
+    (values head body clause-type)))
 
 
 (defun optimize-wamcode (code A-start)
@@ -1207,22 +1223,232 @@
 			       (when (and have-permanent (>= 0 remain) (not deallocate-emitted))
 				 (setf deallocate-emitted t)
 				 (list (list 'deallocate)))))
-			   (cond
-			     ((cut-operator-p b)
-			      (append
-			       (if (= body-num 0)
-				   (list (list 'neck-cut))
-				   `((cut ,(cddr (assoc '|!| assign-table)))))
-			       deallocate-part))
-			     ((= -1 remain)
-			      (append deallocate-part
-				      `((execute ,(cons (car b) (arity b))))))
-			     (t
-			      (append deallocate-part
-				      `((call ,(cons (car b) (arity b)) ,remain))))))))
+			  (cond
+			    ((cut-operator-p b)
+			     (append
+			      (if (= body-num 0)
+				  (list (list 'neck-cut))
+				  `((cut ,(cddr (assoc '|!| assign-table)))))
+			      deallocate-part))
+			    ((= -1 remain)
+			     (append deallocate-part
+				     `((execute ,(cons (car b) (arity b))))))
+			    (t
+			     (append deallocate-part
+				     `((call ,(cons (car b) (arity b)) ,remain))))))))
 		     body remain-list)
 		    it (list (list 'proceed))))))))))))
 
+(defmacro append-hash (key val ht)
+  `(if (have-key? ,key ,ht)
+       (setf (gethash ,key ,ht) (append (gethash ,key ,ht) (list ,val)))
+       (setf (gethash ,key ,ht) (list ,val))))
+
+(defun mapcanhash (f ht)
+  (let (acc)
+    (with-hash-table-iterator (iter ht)
+      (loop
+	 (multiple-value-bind (has-next? k v) (iter)
+	   (if has-next?
+	       (setf acc (nconc acc (funcall f k v)))
+	       (return)))))
+    acc))
+
+
+(defun compile-switch-constant (const-table)
+  (let* ((switch-hashtable (make-hash-table))
+	 (dispatch-code
+	  (mapcanhash (lambda (k v)
+			(if (= (length v) 1)
+			    (prog1 nil (setf (gethash k switch-hashtable) (car v)))
+			    (let ((candidate-count (length v))
+				  (counter 0)
+				  (new-label (gensym)))
+			      (setf (gethash k switch-hashtable) new-label)
+			      (cons
+			       `(label ,new-label)
+			       (mapcar
+				(lambda (lbl)
+				  (incf counter)
+				  (cond ((= counter 1)
+					 `(try ,lbl))
+					((= counter candidate-count)
+					 `(trust ,lbl))
+					(t
+					 `(retry ,lbl)))) v))))) const-table)))
+    (values dispatch-code switch-hashtable)))
+
+(defun compile-switch-struct (struct-table)
+  (let* ((switch-hashtable (make-hash-table :test #'equal))
+	 (dispatch-code
+	  (mapcanhash (lambda (k v)
+			(if (= (length v) 1)
+			    (prog1 nil (setf (gethash k switch-hashtable) (car v)))
+			    (let ((candidate-count (length v))
+				  (counter 0)
+				  (new-label (gensym)))
+			      (setf (gethash k switch-hashtable) new-label)
+			      (cons
+			       `(label ,new-label)
+			       (mapcar
+				(lambda (lbl)
+				  (incf counter)
+				  (cond ((= counter 1)
+					 `(try ,lbl))
+					((= counter candidate-count)
+					 `(trust ,lbl))
+					(t
+					 `(retry ,lbl)))) v))))) struct-table)))
+    (values dispatch-code switch-hashtable)))
+
+(defun compile-switch-listterm (list-list)
+  (let ((candidate-count (length list-list))
+	(counter 0)
+	(new-label (gensym)))
+    (if (= 1 (length list-list))
+	(values nil (car list-list))
+	(values (cons `(label ,new-label)
+		      (mapcar
+		       (lambda (lbl)
+			 (incf counter)
+			 (cond ((= counter 1)
+				`(try ,lbl))
+			       ((= counter candidate-count)
+				`(trust ,lbl))
+			       (t
+				`(retry ,lbl)))) list-list)) new-label))))		      
+
+(defun compile-indexing-code (entrance const-table list-list struct-table)
+  (let* ((const-label (if (= 0 (hash-table-count const-table))
+			  'fail
+			  (gensym)))
+	 (list-label (if (= 0 (length list-list))
+			 'fail
+			 (gensym)))
+	 (struct-label (if (= 0 (hash-table-count struct-table))
+			   'fail
+			   (gensym)))
+	 (const-block (when (not (eq 'fail const-label))
+			(multiple-value-bind (dc ht) (compile-switch-constant const-table)
+			  (cons `(label ,const-label)
+				(cons `(switch-on-constant ,ht) dc)))))
+	 (list-block (when (not (eq 'fail list-label))
+		       (multiple-value-bind (dc lbl) (compile-switch-listterm list-list)
+			 (setq list-label lbl)
+			 dc)))
+	 (struct-block (when (not (eq 'fail struct-label))
+			 (multiple-value-bind (dc ht) (compile-switch-struct struct-table)
+			   (cons `(label ,struct-label)
+				 (cons `(switch-on-structure ,ht) dc))))))
+    (nconc `((switch-on-term ,entrance ,const-label ,list-label ,struct-label))
+	   const-block list-block struct-block)))
+
+(defun compile-subsequence (subseq)
+  (if (= (length subseq) 1)
+      (copy-seq (cdar subseq))
+      (let* ((clause-count (length subseq)) (counter 0)
+	     (entrance (gensym)) (next-label entrance)
+	     (constant-label-table (make-hash-table))
+	     (struct-label-table (make-hash-table :test #'equal))
+	     (list-label-list nil)
+	     (main-code
+	      (mapcan
+	       (lambda (s)
+		 (incf counter)
+		 (cons-when next-label
+			    `(label ,next-label)
+			    (cons
+			     (cond ((= counter 1)
+				    (setq next-label (gensym)) `(try-me-else ,next-label))
+				   ((= counter clause-count)
+				    (list 'trust-me))
+				   (t
+				    (setq next-label (gensym)) `(retry-me-else ,next-label)))
+			     (cons
+			      (let ((arg-1 (car s)) (new-label (gensym)))
+				(format t "arg-1=>~A  (" arg-1)
+				(cond
+				  ((listterm-p arg-1)
+				   ;;list
+				   (format t "list)~%")
+				   (setq list-label-list (append list-label-list (list new-label))))
+				  ((and (termp arg-1) (= (arity arg-1) 0))
+				   ;;constant
+				   (format t "constant)~%")
+				   (append-hash (car arg-1) new-label constant-label-table))
+				  (t
+				   ;;structure
+				   (format t "structure)~%")
+				   (append-hash
+				    (cons (car arg-1) (arity arg-1))
+				    new-label struct-label-table)))
+				`(label ,new-label))	    
+			      (copy-seq (cdr s)))))) subseq))
+	     (indexing-code
+	      (compile-indexing-code
+	       entrance constant-label-table list-label-list struct-label-table)))
+	(nconc indexing-code main-code))))
+
+
+(defun compile-dispatching-code (key)
+  (let ((subsequence-list nil)
+	(current-subsequence nil))
+    (dolist (pair (gethash key *clause-code-table*))
+      (if (or (variablep (car pair)) (null (car pair)))
+	  (progn
+	    (when current-subsequence
+	      (push (reverse current-subsequence) subsequence-list)
+	      (setq current-subsequence nil))
+	    (push (list pair) subsequence-list))
+	  (push pair current-subsequence)))
+    (when current-subsequence
+      (push (reverse current-subsequence) subsequence-list))
+    (setq subsequence-list (reverse subsequence-list))
+    (if (= (length subsequence-list) 1)
+	(compile-subsequence (car subsequence-list))
+	(let ((subseq-count (length subsequence-list))
+	      (next-label nil) (counter 0))
+	  (mapcan (lambda (s)
+		    (incf counter)
+		    (cons-when next-label
+			       `(label ,next-label)
+			       (cons
+				(cond ((= counter 1)
+				       (setq next-label (gensym)) `(try-me-else ,next-label))
+				      ((= counter subseq-count)
+				       (list 'trust-me))
+				      (t
+				       (setq next-label (gensym)) `(retry-me-else ,next-label)))
+				(compile-subsequence s)))) subsequence-list)))))
+
+(defun repl ()
+  (loop
+     (write-string  "> ")
+     (let ((clause (parse *standard-input*)))
+       (multiple-value-bind (head body clause-type) (devide-head-body clause)
+	 (let* ((arity-list (make-arity-list head body))
+		(A-start (1+ (apply #'max arity-list)))
+		(compiled (compile-clause clause)))
+	   (let ((newcode (optimize-wamcode compiled A-start)))
+	     (let ((newcode (remove-unnecessary-code newcode)))
+	       (let ((newcode (set-unsafe-and-local! newcode)))
+		 (let ((newcode (reallocate-registers! newcode A-start arity-list)))
+		   (let ((newcode (remove-unnecessary-pair newcode)))
+		     (case clause-type
+		       ((fact rule)
+			(let ((key (cons (car head) (arity head))))
+			  (progn (if (have-key? key *clause-code-table*)
+				     (rplacd (last (gethash key *clause-code-table*))
+					     (list (cons (cadr head) newcode)))
+				     (setf (gethash key *clause-code-table*)
+					   (list (cons (cadr head) newcode))))
+				 (setf (gethash key *dispatching-code-table*)
+				       (compile-dispatching-code key)))))
+		       (question
+			)
+		       (call
+			)))
+		   (print-wamcode newcode))))))))))
 
 
 #|
