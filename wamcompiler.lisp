@@ -1527,42 +1527,47 @@
 
 (defun repl ()
   (loop
-     (write-string  "> ")
-     (let ((find-all-solution nil))
-       (handler-bind
-	   ((prolog-query-failed (lambda (c)
-				   (declare (ignore c))
-				   (format t "no.~%")))
-	    (prolog-found-solution (lambda (c)
-				     (show-solution (vars c))
-				     (if (or (null (vars c)) (not (can-backtrack? c)))
-					 (format t "~%yes.~%")
-					 (if find-all-solution
-					     (invoke-restart 'next-solution)
-					     (case (next-solution-prompt)
-					       (no (invoke-restart 'next-solution))
-					       (all (setq find-all-solution t)
-						    (invoke-restart 'next-solution))
-					       (yes (format t "~%yes!~%")))))))
-	    (prolog-syntax-error (lambda (c)
-				   (princ c) (format t "~%") (clear-input *standard-input*))))
-	 (let ((clause (parse *standard-input*)))
-	   (multiple-value-bind (head body clause-type) (devide-head-body clause)
-	     (let ((wamcode (compile-and-optimize clause head body))) 
-	       (case clause-type
-		 ((fact rule)
-		  (let ((key (cons (car head) (arity head))))
-		    (progn (if (have-key? key *clause-code-table*)
-			       (rplacd (last (gethash key *clause-code-table*))
-				       (list (cons (cadr head) wamcode)))
-			       (setf (gethash key *clause-code-table*)
-				     (list (cons (cadr head) wamcode))))
-			   (setf (gethash key *dispatching-code-table*)
-				 (compile-dispatching-code key)))))
-		 (query
-		  (send-query wamcode))
-		 (call
-		  (send-query wamcode))))))))))
+     (block eval-once
+       (write-string  "> ")
+       (let ((find-all-solution nil))
+	 (handler-bind
+	     ((prolog-query-failed (lambda (c)
+				     (declare (ignore c))
+				     (format t "no.~%")
+				     (return-from eval-once)))
+	      (prolog-found-solution (lambda (c)
+				       (show-solution (vars c))
+				       (if (or (null (vars c)) (not (can-backtrack? c)))
+					   (progn (format t "~%yes.~%")
+						  (return-from eval-once))
+					   (if find-all-solution
+					       (invoke-restart 'next-solution)
+					       (case (next-solution-prompt)
+						 (no (invoke-restart 'next-solution))
+						 (all (setq find-all-solution t)
+						      (invoke-restart 'next-solution))
+						 (yes (format t "~%yes!~%")
+						      (return-from eval-once)))))))
+	      (prolog-syntax-error (lambda (c)
+				     (princ c) (format t "~%")
+				     (clear-input *standard-input*) (return-from eval-once))))
+	   (let ((clause (parse *standard-input*)))
+	     (multiple-value-bind (head body clause-type) (devide-head-body clause)
+	       (let ((wamcode (compile-and-optimize clause head body))) 
+		 (case clause-type
+		   ((fact rule)
+		    (let ((key (cons (car head) (arity head))))
+		      (progn (if (have-key? key *clause-code-table*)
+				 (rplacd (last (gethash key *clause-code-table*))
+					 (list (cons (cadr head) wamcode)))
+				 (setf (gethash key *clause-code-table*)
+				       (list (cons (cadr head) wamcode))))
+			     (setf (gethash key *dispatching-code-table*)
+				   (compile-dispatching-code key)))))
+		   (query
+		    (send-query wamcode))
+		   (call
+		    (send-query wamcode)))))))))))
 
 
 #|
@@ -1675,7 +1680,6 @@ heap: -2,-4,-6,...
 	 '(if *fail* (backtrack) (setq *P* (cdr *P*)))))
     (labels
 	((dereference (a)
-	   (princ a)
 	   (destructuring-bind (tag . value) (store a)
 	     (if (and (eq tag 'ref) (/= value a))
 		 (dereference value)
@@ -1689,13 +1693,13 @@ heap: -2,-4,-6,...
 	   (let ((t1 (car (store a1))) (t2 (car (store a2))))
 	     (if (and (eq t1 'ref) (or (not (eq t2 'ref)) (addr< a2 a1)))
 		 (progn (setf (store a1) (store a2))
-			(trail a1))
+			(set-to-trail a1))
 		 (progn (setf (store a2) (store a1))
-			(trail a2)))))
-	 (trail (a)
-	   (if (or (addr< a *HB*) (and (addr< *H* a) (addr< a *B*)))
-	       (progn (setf (trail *TR*) a)
-		      (incf *TR*))))
+			(set-to-trail a2)))))
+	 (set-to-trail (a)
+	   (when (or (addr< a *HB*) (and (addr< *H* a) (addr< a *B*)))
+	     (setf (trail *TR*) a)
+	     (incf *TR*)))
 	 (unwind-trail (a1 a2)
 	   (loop for i from a1 to (1- a2) do
 		(setf (store (trail i)) (cons 'ref (trail i)))))
@@ -1761,7 +1765,6 @@ heap: -2,-4,-6,...
 					       (setf (register x) (heap *H*))
 					       (setf (register a) (heap *H*))
 					       (setf *H* (addr+ *H* 1))
-					       (clear-output)
 					       (setq *P* (cdr *P*))))
 		     (put-variable-permanent (let* ((y (cadr inst)) (a (caddr inst))
 						    (addr (addr+ *E* y 1)))
@@ -1890,7 +1893,7 @@ heap: -2,-4,-6,...
 					  (addr (dereference a)))
 				     (case (car (store addr))
 				       (ref (setf (store addr) (cons 'con c))
-					    (trail addr))
+					    (set-to-trail addr))
 				       (con (let ((c2 (cdr (store addr))))
 					      (if (not (eq c c2))
 						  (setq *fail* t))))
@@ -1963,7 +1966,8 @@ heap: -2,-4,-6,...
 			(case *mode*
 			  (read (let ((addr (dereference *S*)))
 				  (case (car (store addr))
-				    (ref (setf (store addr) (cons 'con c)))
+				    (ref (setf (store addr) (cons 'con c))
+					 (set-to-trail addr))
 				    (con (if (not (eq (cdr (store addr)) c))
 					     (setq *fail* t)))
 				    (t (setq *fail* t)))))
@@ -2129,7 +2133,7 @@ heap: -2,-4,-6,...
 			      (setf *B* (stack (addr+ *E* 2 y)))
 			      (tidy-trail))
 			    (setq *P* (cdr *P*))))
-		     (label ;;pass
+		     (label
 		      (setq *P* (cdr *P*)))
 		     (otherwise (error
 				 (make-condition
