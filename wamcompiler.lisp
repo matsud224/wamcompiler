@@ -1010,7 +1010,8 @@
 		(print-wamcode newcode)
 		(format t "<--remove-unnecessary-pair-->~%")
 		(let ((newcode (remove-unnecessary-pair newcode)))
-		  (print-wamcode newcode))))))))))
+		  (print-wamcode newcode)
+		  newcode)))))))))
 
 
 (defmacro cons-when (condition element list)
@@ -1494,7 +1495,7 @@
 (defun call-N-copy-to-next-instraction (code)
   (mapl (lambda (part)
 	  (when (eq (caar part) 'call)
-	    (nconc (second code) (list (third (car part)))))) code))
+	    (nconc (second part) (list (third (car part)))))) code))
 
 
 (defun compile-dispatching-code (key)
@@ -1643,10 +1644,12 @@
 				       (list (cons (cadr head) wamcode))))
 			     (update-dispatching-code key)))))
 		 (query
-		  (let ((wamcode (compile-and-optimize clause head body t)))
+		  (let ((wamcode (call-n-copy-to-next-instraction
+				  (compile-and-optimize clause head body t))))
 		    (send-query wamcode)))
 		 (call
-		  (let ((wamcode (compile-and-optimize clause head body))) 
+		  (let ((wamcode (call-n-copy-to-next-instraction
+				  (compile-and-optimize clause head body)))) 
 		    (send-query wamcode)))))))))))
 
 
