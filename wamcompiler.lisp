@@ -1078,6 +1078,15 @@
 	  (t
 	   (push-void-if-possible)
 	   (push inst current-block))))
+      ;;neck-cutで終わるときもある
+      (when current-block
+	(setq optimized-code
+	      (append optimized-code
+		      (if first-block?
+			  (progn
+			    (setq first-block? nil)
+			    (optimize-head (reverse current-block) A-start))
+			  (optimize-body (reverse current-block) A-start)))))
       optimized-code)))
 
 
@@ -1304,7 +1313,8 @@
 			       (append deallocate-part
 				       `((call ,(cons (car b) (arity b)) ,remain))))))))
 		       body remain-list)
-		      it (list (list 'proceed)))))))
+		      (if (equal it '((neck-cut))) (append it (list (list 'proceed))) it)
+		      (list (list 'proceed)))))))
 	     (if query-mode `((notify-solution ,assign-table)) nil))))))))
 
 (defmacro append-hash (key val ht)
@@ -1678,9 +1688,9 @@ heap: -2,-4,-6,...
 (defvar *mode*)
 
 
-(defconstant bottom-of-stack -3) ;;-1はBの初期値としてつかう（初期状態でB<Eにしたいため）
+(defconstant bottom-of-stack -3) ;;-1はEの初期値としてつかう（初期状態でB>Eにしたいため）
 (defconstant bottom-of-heap -2)
-(defconstant initial-value-of-B -1)
+(defconstant initial-value-of-E -1)
 
 (deftype stack-address ()
   '(and (satisfies minusp) (satisfies oddp)))
@@ -1729,6 +1739,7 @@ heap: -2,-4,-6,...
   (aref *stack-area* (1- (- (floor addr 2)))))
 
 (defun (setf stack) (new-val addr)
+  ;(format t "stack ~A <- ~A~%" addr new-val)
   (let ((real-addr (1- (- (floor addr 2)))))
     ;(format t "stack ~A = ~A~%" addr new-val)
     (unless (array-in-bounds-p *stack-area* real-addr)
@@ -1756,6 +1767,7 @@ heap: -2,-4,-6,...
   (stack (addr+ *E* y 1)))	
 
 (defun (setf stackvar) (new-val y)
+  ;(format t "stackvar Y~A(~A) <- ~A~%" y (addr+ *E* y 1) new-val)
   (setf (stack (addr+ *E* y 1)) new-val))
 
 (defun print-memory ()
@@ -1786,11 +1798,20 @@ heap: -2,-4,-6,...
 (defun send-query (query-code)
   (setq *P* query-code)
   (setq *CP* nil)
-  (setq *B* initial-value-of-B)
-  (setq *E* bottom-of-stack)
   (setq *H* bottom-of-heap)
   (setq *HB* bottom-of-heap)
   (setq *TR* 0)
+  ;;ダミーのチョイスポイントフレームを作る
+  (setq *B* bottom-of-stack)
+  (setf (stack *B*) 0)
+  (setf (stack (addr+ *B* 1)) nil)
+  (setf (stack (addr+ *B* 2)) nil)
+  (setf (stack (addr+ *B* 3)) nil)
+  (setf (stack (addr+ *B* 4)) nil)
+  (setf (stack (addr+ *B* 5)) *TR*)
+  (setf (stack (addr+ *B* 6)) *H*)
+  (setf (stack (addr+ *B* 7)) nil)
+  (setq *E* initial-value-of-E)
   (setq *fail* nil)
   (macrolet
       ((backtrack-or-continue ()
@@ -1802,7 +1823,7 @@ heap: -2,-4,-6,...
 		 (dereference value)
 		 a)))
 	 (backtrack ()
-	   (if (eq *B* initial-value-of-B)
+	   (if (eq *B* bottom-of-stack)
 	       (signal (make-condition 'prolog-query-failed))
 	       (progn (setq *fail* nil)
 		      (setf *B0* (stack (addr+ *B* (stack *B*) 7)))
@@ -1891,7 +1912,7 @@ heap: -2,-4,-6,...
 	     alist)))
       (loop
 	 (let ((inst (car *P*)))
-	   ;(format t "next: ~A  fail:~A~%" (car inst) *fail*)
+	   ;(format t "next: ~A  *HB*=~A *B*=~A fail:~A~%" (car inst) *HB* *B* *fail*)
 	   (if (null inst)
 	       (return)
 	       (if (eq 'fail inst)
@@ -1901,7 +1922,7 @@ heap: -2,-4,-6,...
 		      (restart-case
 			  (signal (make-condition 'prolog-found-solution
 						  :vars (make-solution-result (second inst))
-						  :can-backtrack? (/= *B* initial-value-of-B)))
+						  :can-backtrack? (/= *B* bottom-of-stack)))
 			(next-solution ()
 			  (backtrack))))
 		     (put-variable-temporary (let ((x (cadr inst)) (a (caddr inst)))
@@ -2131,10 +2152,11 @@ heap: -2,-4,-6,...
 		     (allocate
 		      (let ((new-E
 			     (if (addr< *B* *E*)
-				 (addr+ *E* (car (last (car (stack (addr+ *E* 1)))))  2)
+				 (addr+ *E* (car (last (car *CP*)))  2)
 				 (addr+ *B* (stack *B*) 8))))
 			(setf (stack new-E) *E*)
 			(setf (stack (addr+ new-E 1)) *CP*)
+			;(format t "~%~% alocate *CP*~A~%~%" *CP*)
 			(setf *E* new-E)
 			(setq *P* (cdr *P*))))
 		     (deallocate
@@ -2142,12 +2164,15 @@ heap: -2,-4,-6,...
 		      (setf *E* (stack *E*))
 		      (setq *P* (cdr *P*)))
 		     (allocate-for-query
-		      (setf (stack *E*) *E*)
-		      (setf (stack (addr+ *E* 1)) *P*)
-		      (setq *P* (cdr *P*)))
+		      (let ((new-E (addr+ *B* (stack *B*) 8)))
+			(setf (stack new-E) nil)
+			(setf (stack (addr+ new-E 1)) *P*)
+			(setf *E* new-E)
+			(setq *P* (cdr *P*))))
 		     (call (let ((pair (cadr inst)))
 			     (if (defined pair)
 				 (progn (setf *CP* (cdr *P*))
+					;(format t "~%~% call *CP*=~A~%~%" *CP*)
 					(setf *num-of-args* (cdr pair))
 					(setf *B0* *B*)
 					(setf *P* (gethash pair *dispatching-code-table*)))
@@ -2167,9 +2192,11 @@ heap: -2,-4,-6,...
 			     ;;(third inst)に、ラベルの次の命令へのポインタが入ってる
 			     (new-B
 			      (if (addr< *B* *E*)
-				  (addr+ *E* (car (last (car (stack (addr+ *E* 1))))) 2)
+				  (addr+ *E* (car (last (car *CP*))) 2)
 				  (addr+ *B* (stack *B*) 8)))
 			     (n *num-of-args*))
+			;(format t "~A new-B=~A (last N=~A) ~%"
+			;	(addr< *B* *E*) new-B (car (last (car (stack (addr+ *E* 1))))))
 			(setf (stack new-B) *num-of-args*)
 			(dotimes (i n)
 			  (setf (stack (addr+ new-B (1+ i))) (register (1+ i))))
@@ -2207,9 +2234,7 @@ heap: -2,-4,-6,...
 				 (setf *TR* (stack (addr+ *B* n 5)))
 				 (setf *H* (stack (addr+ *B* n 6)))
 				 (setf *B* (stack (addr+ *B* n 3)))
-				 (if (/= *B* initial-value-of-B)
-				     (setf *HB* (stack (addr+ *B* n 6)))
-				     (setf *HB* bottom-of-heap))
+				 (setf *HB* (stack (addr+ *B* (stack *B*) 6)))
 				 (setq *P* (cdr *P*))))
 		     (try
 		      (let* ((l (third inst))
@@ -2255,9 +2280,7 @@ heap: -2,-4,-6,...
 			      (setf *TR* (stack (addr+ *B* n 5)))
 			      (setf *H* (stack (addr+ *B* n 6)))
 			      (setf *B* (stack (addr+ *B* n 3)))
-			      (if (/= *B* initial-value-of-B)
-				  (setf *HB* (stack (addr+ *B* n 6)))
-				  (setf *HB* bottom-of-heap))
+			      (setf *HB* (stack (addr+ *B* (stack *B*) 6)))
 			      (setf *P* l)))
 		     (switch-on-term (let ((v (sixth inst)) (c (seventh inst))
 					   (l (eighth inst)) (s (ninth inst)))
