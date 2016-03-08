@@ -401,8 +401,9 @@
 (defun flatten-comma (tree)
   (cond ((and (consp tree) (eq '|,| (car tree)))
 	 (append (flatten-comma (cadr tree)) (flatten-comma (caddr tree))))
-	((consp tree) (list tree))
-	(t (error (make-condition 'prolog-compile-error :cause "predicate expected on body")))))
+	((and (consp tree) (symbolp (car tree))) (list tree))
+	(t (error (make-condition 'prolog-compile-error
+				  :cause "predicate expected on body")))))
 
 (defun collect-vars (goal)
   (cond ((anonymousvar-p goal) nil)
@@ -2486,6 +2487,9 @@ heap: -2,-4,-6,...
 (defun wamdata-atom-p (a)
   (and (wamdata-constant-p a) (symbolp (wamdata-content a))))
 
+(defun wamdata-predicate-p (a)
+  (or (wamdata-atom-p a) (wamdata-struct-p a)))
+
 #|
 (defmacro prolog-success ()
   `(setf *P* *CP*))
@@ -2517,7 +2521,9 @@ heap: -2,-4,-6,...
 			  (prolog-success ()
 			    (setq ,flag 'success) (setf *P* *CP*) (return-from ,exit))
 			  (prolog-backtrack-or-continue ()
-			    (if *fail* (prolog-fail) (prolog-success))))
+			    (if *fail* (prolog-fail) (prolog-success)))
+			  (prolog-suppress-control ()
+			    (setq ,flag 't)))
 		   (unwind-protect
 			,@body
 		     (unless ,flag
@@ -2566,6 +2572,7 @@ heap: -2,-4,-6,...
       (prolog-fail)))
 
 (define-prolog-builtin "write" (x)
+  ;(princ "<write>")
   (princ (prolog-expr->string (to-lisp-object x)) *query-io*))
 
 (define-prolog-builtin "nl" ()
@@ -2696,15 +2703,80 @@ heap: -2,-4,-6,...
 
 (define-prolog-builtin "=.." (struct list)
   (prolog-assert "=.." 2 "instantiation error"
-		 (not (and (prolog-contain-unbound-p (to-lisp-object struct))
-			   (prolog-contain-unbound-p (to-lisp-object list)))))
+		 (not (and (wamdata-unbound-p struct)
+			   (wamdata-unbound-p list))))
   (cond ((and (wamdata-unbound-p struct) (wamdata-list-p list))
 	 (unify-av struct (univ-list->struct (to-lisp-object list))))
-	((and (wamdata-unbound-p list) (or (wamdata-atom-p struct)
-					   (wamdata-struct-p struct)))
+	((and (wamdata-unbound-p list) (wamdata-predicate-p struct))
 	 (unify-av list (univ-struct->list (to-lisp-object struct))))
-	((and (wamdata-list-p list) (or (wamdata-atom-p struct)
-					(wamdata-struct-p struct)))
+	((and (wamdata-list-p list) (wamdata-predicate-p struct))
 	 (unify-av struct (univ-list->struct (to-lisp-object list))))
 	(t (prolog-fail)))
   (prolog-backtrack-or-continue))
+
+(define-prolog-builtin "call" (pred)
+  (prolog-assert "call" 2 "Argument 1 is not callable."
+		 (wamdata-predicate-p pred))
+  (prolog-suppress-control)
+  (let* ((obj (if (symbolp (to-lisp-object pred))
+		   (list *structure* (to-lisp-object pred))
+		   (to-lisp-object pred)))
+	 (wam-code `((execute ,(cons (second obj) (length (cddr obj))))))
+	 (arg-counter 0))
+    (dolist (item (cddr obj))
+      ;(format t "item: ~A~%" item)
+      (incf arg-counter)
+      (let ((wam-item (cond ((null item) (cons 'con '[]))
+			    ((atom item) (cons 'con item))
+			    ((eq (car item) *unbound-variable*)
+			     (cons 'ref (cdr item)))
+			    (t
+			     (wam-place-compound-on-heap item)))))
+	(setf (register arg-counter) wam-item)))
+    (setf *CP* (cdr *P*))
+    (setf *num-of-args* (length (cddr obj)))
+    (setf *B0* *B*)
+    (setf *P* wam-code)))
+
+(defclass collector ()
+  ((enabled? :accessor enabled?
+	     :initform nil)
+   (collect-target :accessor collect-target
+		   :initarg  target)
+   (items :accessor items
+	  :initform nil)
+   (saved-cp :accessor saved-cp
+	     :initform nil
+	     :initarg saved-cp)))
+
+(defmethod collect ((c collector))
+  (push (items c) (to-lisp-object (target c))))
+
+(defmethod collect-start ((c collector))
+  (cond ((c 
+
+			     
+(define-prolog-builtin "findall" (template pred result)
+  (prolog-assert "findall" 3 "instantiation error"
+		 (not (wamdata-unbound-p pred)))
+  (prolog-suppress-control)
+  (let* ((obj (to-lisp-object pred))
+	 (collector (make-instance 'collctor :target (register template) 
+	 (wam-code `((collecter-init ,collector)
+		     (call ,(cons (second obj) (length (cddr obj))) 0)
+		     (collect ,collector)))
+	 (arg-counter 0))
+    (dolist (item (cddr obj))
+      (incf arg-counter)
+      (let ((wam-item (cond ((null item) (cons 'con '[]))
+			    ((atom item) (cons 'con item))
+			    ((eq (car item) *unbound-variable*)
+			     (cons 'ref (cdr item)))
+			    (t
+			     (wam-place-compound-on-heap item)))))
+	(setf (register arg-counter) wam-item)))
+    (setf *CP* (cdr *P*))
+    (setf *num-of-args* (length (cddr obj)))
+    (setf *B0* *B*)
+    (setf *P* wam-code)))
+    
