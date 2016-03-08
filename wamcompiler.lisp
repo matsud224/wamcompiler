@@ -1,3 +1,6 @@
+(quicklisp:quickload 'cl-cont)
+(use-package 'cl-cont)
+
 ;;(defun main ()
 ;;  (format t "hello,world~%"))
 ;;
@@ -6,11 +9,14 @@
 ;;			  :executable t)
 
 (defvar *unbound-variable* (gensym))
+(defvar *structure* (gensym))
 
 (defvar *operator-list* nil)
 (defvar *clause-code-table* (make-hash-table :test #'equal)) ;; key (functor . arity). 
 (defvar *dispatching-code-table* (make-hash-table :test #'equal))
+(defvar *builtin-predicate-table* (make-hash-table :test #'equal))
 
+(define-condition prolog-escape-repl (simple-condition) ())
 
 (define-condition prolog-query-failed (simple-condition) ())
 
@@ -29,12 +35,32 @@
 	     (when (cause condition)
 	       (format stream " (~A)" (cause condition))))))
 
+(define-condition prolog-compile-error (simple-error)
+  ((cause :initarg :cause
+	  :initform nil
+	  :accessor cause))
+  (:report (lambda (condition stream)
+	     (format stream "Compile error!")
+	     (when (cause condition)
+	       (format stream " (~A)" (cause condition))))))
+
 (define-condition prolog-bad-instruction-error (simple-error)
   ((inst :initarg :inst
 	 :initform nil
 	 :accessor bad-inst))
   (:report (lambda (condition stream)
 	     (format stream "Bad instruction: ~A" (bad-inst condition)))))
+
+(define-condition prolog-builtin-predicate-error (simple-error)
+  ((predicate :initarg :predicate
+	      :initform nil
+	      :accessor predicate)
+   (cause :initarg :cause
+	  :initform nil
+	  :accessor cause))
+  (:report (lambda (condition stream)
+	     (format stream "Error in builtin-predicate(~A/~A): ~A"
+		     (car (predicate condition)) (cdr (predicate condition)) (cause condition)))))
 
 
 (defmacro op-atom (x) `(car ,x))
@@ -62,7 +88,8 @@
 	  ((eq c #\,) (cons 'atom '|,|))
 	  ((eq c #\;) (cons 'atom '|;|))
 	  ((eq c #\!) (cons 'atom '|!|))
-	  ((digit-char-p c) (unread-char c s) (cons 'int (read-int s)))
+	  ((eq c #\') (read-quoted-atom s))
+	  ((digit-char-p c) (unread-char c s) (cons 'atom (read-int s)))
 	  ((member c *non-alphanum-chars*)
 	   (unread-char c s) (read-non-alphanum-atom s))
 	  (t (unread-char c s) (read-alphanum-atom s)))))
@@ -91,7 +118,7 @@
 	(unread-char c s) (return nil))
       (setq acc (cons c acc)))
     (let ((str (concatenate 'string (reverse acc))))
-      (cond ((or (upper-case-p (char str 0)) (equal str "_"))
+      (cond ((or (upper-case-p (char str 0)) (equal (char str 0) #\_))
 	     (cons 'variable (intern str)))
 	    (t (cons 'atom (intern str)))))))
 
@@ -104,6 +131,15 @@
     (let ((str (concatenate 'string (reverse acc))))
       (cond ((equal str ".") '(dot))
 	    (t (cons 'atom (intern str)))))))
+
+(defun read-quoted-atom (s)
+  (let ((acc))
+    (dostream (c s)
+      (when (eq #\' c)
+	(return nil))
+      (setq acc (cons c acc)))
+    (let ((str (concatenate 'string (reverse acc))))
+      (cons 'atom (intern str)))))
 
 (defun register-operator (op)
   (labels ((op< (x y)
@@ -277,9 +313,7 @@
 	   (or (and ignore-comma (commap tok))
 	       (member (car tok) '(rparen dot rbracket vertical-bar))))
 	 (operatorp (tok)
-	   (and (eq (car tok) 'atom) (get (cdr tok) 'op)))
-	 (non-operandp (tok ignore-comma)
-	   (or (separatorp tok ignore-comma) (operatorp tok)))
+	   (and (eq (car tok) 'atom) (symbolp (cdr tok))  (get (cdr tok) 'op)))
 	 (parse-sub (head &optional (ignore-comma nil))
 	   (block exit
 	     (let ((current-prec (op-prec (car head)))
@@ -294,23 +328,20 @@
 		    (unget-token gottok)
 		    (return-from exit (parse-prim ignore-comma)))
 		   ((operatorp gottok)
-		    (let* ((gottok-2 (let ((n (next-token))) (unget-token n) n))
-			   (have-operand (not (non-operandp gottok-2 ignore-comma))))
-		      (do ((op (car head) (progn (setq head (cdr head)) (car head))))
-			  ((or (null op) (not (eq current-prec (op-prec op)))
-			       (not (member (op-assoc op) '(fx fy))))
-			   (unget-token gottok))
-			(if (and (eq (car gottok) 'atom) (eq (cdr gottok) (op-atom op)))
-			    (if have-operand
-				(case (op-assoc op)
-				  (fx
-				   (return-from exit
-				     `(struct ,(op-atom op)
-					      ,(parse-sub next-head ignore-comma))))
-				  (fy
-				   (return-from exit
-				     `(struct ,(op-atom op)
-					      ,(parse-sub current-head ignore-comma))))))))))
+		    (do ((op (car head) (progn (setq head (cdr head)) (car head))))
+			((or (null op) (not (eq current-prec (op-prec op)))
+			     (not (member (op-assoc op) '(fx fy))))
+			 (unget-token gottok))
+		      (if (eq (cdr gottok) (op-atom op))
+			  (case (op-assoc op)
+			    (fx
+			     (return-from exit
+			       `(struct ,(op-atom op)
+					,(parse-sub next-head ignore-comma))))
+			    (fy
+			     (return-from exit
+			       `(struct ,(op-atom op)
+					,(parse-sub current-head ignore-comma))))))))
 		   (t (unget-token gottok))))
 	       (let ((operand-1 (parse-sub next-head ignore-comma))
 		     (gottok (next-token)))
@@ -319,12 +350,12 @@
 		    (unget-token gottok) (return-from exit operand-1))
 		   ((operatorp gottok)
 		    (let* ((gottok-2 (let ((n (next-token))) (unget-token n) n))
-			   (have-operand (not (non-operandp gottok-2 ignore-comma))))
+			   (next-sep? (separatorp gottok-2 ignore-comma)))
 		      (do ((op (car head) (progn (setq head (cdr head)) (car head))))
 			  ((or (null op) (not (eq current-prec (op-prec op))))
 			   (progn (unget-token gottok) (return-from exit operand-1)))
-			(if (and (eq (car gottok) 'atom) (eq (cdr gottok) (op-atom op)))
-			    (if have-operand
+			(if (eq (cdr gottok) (op-atom op))
+			    (if (not next-sep?)
 				(case (op-assoc op)
 				  (xfy
 				   (return-from exit
@@ -346,12 +377,12 @@
 				     (parse-sub current-head ignore-comma))))
 				(case (op-assoc op)
 				  (xf
-				   (return-from exit
-				     `(struct ,(op-atom op) ,operand-1)))
+				       (return-from exit
+					 `(struct ,(op-atom op) ,operand-1)))
 				  (yf
-				   (unget-token `(struct ,(op-atom op) ,operand-1))
-				   (return-from exit
-				     (parse-sub current-head ignore-comma)))))))))))))))
+				       (unget-token `(struct ,(op-atom op) ,operand-1))
+				       (return-from exit
+					 (parse-sub current-head ignore-comma)))))))))))))))
       (let ((result (arrange (parse-sub *operator-list*))))
 	(if (not (eq (car (next-token)) 'dot))
 	    (error (make-condition 'prolog-syntax-error
@@ -360,7 +391,7 @@
 
 (defun arity (term) (length (cdr term)))
 
-(defmacro variablep (x) `(atom ,x))
+(defmacro variablep (x) `(and (atom ,x)))
 (defmacro anonymousvar-p (x) `(eq ,x '|_|))
 (defmacro termp (x) `(listp ,x))
 (defmacro listterm-p (x) `(and (listp ,x) (eq (car ,x) '|.|)))
@@ -370,7 +401,8 @@
 (defun flatten-comma (tree)
   (cond ((and (consp tree) (eq '|,| (car tree)))
 	 (append (flatten-comma (cadr tree)) (flatten-comma (caddr tree))))
-	(t (list tree))))
+	((consp tree) (list tree))
+	(t (error (make-condition 'prolog-compile-error :cause "predicate expected on body")))))
 
 (defun collect-vars (goal)
   (cond ((anonymousvar-p goal) nil)
@@ -1313,7 +1345,7 @@
 			       (append deallocate-part
 				       `((call ,(cons (car b) (arity b)) ,remain))))))))
 		       body remain-list)
-		      (if (equal it '((neck-cut))) (append it (list (list 'proceed))) it)
+		      (if (eq (caar (last it)) 'neck-cut) (append it (list (list 'proceed))) it)
 		      (list (list 'proceed)))))))
 	     (if query-mode `((notify-solution ,assign-table)) nil))))))))
 
@@ -1581,27 +1613,24 @@
     (mapc (lambda (e) (princ e s)) list)))
 
 (defun prolog-list->string (list)
-  (labels ((flatten (rest acc)
-	     (if (and (consp rest) (eq (car rest) '|.|))
-		 (flatten (third rest) (cons (second rest) acc))
-		 (values (reverse acc) rest))))
-    (multiple-value-bind (butlast last) (flatten list nil)
-      (format nil "[~A]"
-	      (concat-string-list
-	       (append (join "," (mapcar #'prolog-expr->string butlast))
-		       (if (not (eq last '[])) (list "|" (prolog-expr->string last)))))))))
+  (let ((butlast (append (butlast list) (list (car (last list)))))
+	(last (cdr (last list))))
+    (format nil "[~A]"
+	    (concat-string-list
+	     (append (join "," (mapcar #'prolog-expr->string  butlast))
+		     (if (not (null last)) (list "|" (prolog-expr->string last))))))))
 
 (defun prolog-expr->string (expr)
-  (cond ((eq expr *unbound-variable*)
-	 (format nil "<unbound>"))
-	((atom expr)
+  (cond ((atom expr)
 	 (format nil "~A" expr))
-	((eq (car expr) '|.|)
-	 (prolog-list->string expr))
-	(t
-	 (format nil "~A(~A)" (car expr)
+	((eq (car expr) *unbound-variable*)
+	 (format nil "<unbound>"))
+	((eq (car expr) *structure*)
+	 (format nil "~A(~A)" (cadr expr)
 		 (concat-string-list
-		  (join "," (mapcar #'prolog-expr->string (cdr expr)))))))) 
+		  (join "," (mapcar #'prolog-expr->string (cddr expr))))))
+	(t
+	 (prolog-list->string expr))))
 
 (defun show-solution (vars)
   (dolist (v vars)
@@ -1615,52 +1644,73 @@
   (print-wamcode (gethash (cons (intern functor-str) arity) *dispatching-code-table*)))
 
 (defun repl ()
-  (loop
-     (block eval-once
-       (write-string  "> " *query-io*)
-       (let ((find-all-solution nil))
-	 (handler-bind
-	     ((prolog-query-failed (lambda (c)
-				     (declare (ignore c))
-				     (format *query-io* "no.~%")
-				     (return-from eval-once)))
-	      (prolog-found-solution (lambda (c)
-				       (show-solution (vars c))
-				       (if (or (null (vars c)) (not (can-backtrack? c)))
-					   (progn (format *query-io* "~%yes.~%")
-						  (return-from eval-once))
-					   (if find-all-solution
-					       (progn (format *query-io* "~%")
-						      (invoke-restart 'next-solution))
-					       (case (next-solution-prompt)
-						 (no (invoke-restart 'next-solution))
-						 (all (setq find-all-solution t)
-						      (invoke-restart 'next-solution))
-						 (yes (format *query-io* "~%yes.~%")
-						      (return-from eval-once)))))))
-	      (prolog-syntax-error (lambda (c)
-				     (princ c *query-io*) (format *query-io* "~%")
-				     (clear-input *standard-input*) (return-from eval-once))))
-	   (let ((clause (parse *standard-input*)))
-	     (multiple-value-bind (head body clause-type) (devide-head-body clause)
-	       (case clause-type
-		 ((fact rule)
-		  (let ((wamcode (compile-and-optimize clause head body))) 
-		    (let ((key (cons (car head) (arity head))))
-		      (progn (if (have-key? key *clause-code-table*)
-				 (rplacd (last (gethash key *clause-code-table*))
-					 (list (cons (cadr head) wamcode)))
-				 (setf (gethash key *clause-code-table*)
-				       (list (cons (cadr head) wamcode))))
-			     (update-dispatching-code key)))))
-		 (query
-		  (let ((wamcode (call-n-copy-to-next-instraction
-				  (compile-and-optimize clause head body t))))
-		    (send-query wamcode)))
-		 (call
-		  (let ((wamcode (call-n-copy-to-next-instraction
-				  (compile-and-optimize clause head body)))) 
-		    (send-query wamcode)))))))))))
+  (let ((exit-flag nil))
+    (loop
+       (when exit-flag
+	 (return))
+       (block eval-once
+	 (write-string  "> " *query-io*)
+	 (let ((find-all-solution nil))
+	   (handler-bind
+	       ((prolog-escape-repl (lambda (c)
+				      (declare (ignore c))
+				      (setq exit-flag t)
+				      (return-from eval-once)))
+		(prolog-builtin-predicate-error (lambda (c)
+				       (princ c *query-io*) (format *query-io* "~%")
+				       (clear-input *standard-input*)
+				       (return-from eval-once)))
+		(prolog-query-failed (lambda (c)
+				       (declare (ignore c))
+				       (format *query-io* "~%no.~%")
+				       (return-from eval-once)))
+		(prolog-found-solution (lambda (c)
+					 (show-solution (vars c))
+					 (if (or (null (vars c)) (not (can-backtrack? c)))
+					     (progn (format *query-io* "~%yes.~%")
+						    (return-from eval-once))
+					     (if find-all-solution
+						 (progn (format *query-io* "~%")
+							(invoke-restart 'next-solution))
+						 (case (next-solution-prompt)
+						   (no (invoke-restart 'next-solution))
+						   (all (setq find-all-solution t)
+							(invoke-restart 'next-solution))
+						   (yes (format *query-io* "~%yes.~%")
+							(return-from eval-once)))))))
+		(prolog-syntax-error (lambda (c)
+				       (princ c *query-io*) (format *query-io* "~%")
+				       (clear-input *standard-input*)
+				       (return-from eval-once)))
+		(prolog-compile-error (lambda (c)
+					(princ c *query-io*) (format *query-io* "~%")
+					(clear-input *standard-input*)
+					(return-from eval-once))))
+	     (let ((clause (parse *standard-input*)))
+	       (multiple-value-bind (head body clause-type) (devide-head-body clause)
+		 (case clause-type
+		   ((fact rule)
+		    (let ((wamcode (compile-and-optimize clause head body))) 
+		      (let ((key (cons (car head) (arity head))))
+			(if (have-key? key *builtin-predicate-table*)
+			    (format *query-io*
+				    "Builtin predicate ~A/~A cannot be redefined.~%"
+				    (car key) (cdr key))
+			    (progn
+			      (if (have-key? key *clause-code-table*)
+				  (rplacd (last (gethash key *clause-code-table*))
+					  (list (cons (cadr head) wamcode)))
+				  (setf (gethash key *clause-code-table*)
+					(list (cons (cadr head) wamcode))))
+			      (update-dispatching-code key))))))
+		   (query
+		    (let ((wamcode (call-n-copy-to-next-instraction
+				    (compile-and-optimize clause head body t))))
+		      (send-query wamcode)))
+		   (call
+		    (let ((wamcode (call-n-copy-to-next-instraction
+				    (compile-and-optimize clause head body)))) 
+		      (send-query wamcode))))))))))))
 
 
 #|
@@ -1730,7 +1780,7 @@ heap: -2,-4,-6,...
 
 (defun (setf heap) (new-val addr)
   (let ((real-addr (1- (- (/ addr 2)))))
-    ;(format t "heap ~A =  ~A~%" addr new-val)
+					;(format t "heap ~A =  ~A~%" addr new-val)
     (unless (array-in-bounds-p *heap-area* real-addr)
       (adjust-array *heap-area* (* 2 real-addr)))
     (setf (aref *heap-area* real-addr) new-val)))
@@ -1739,9 +1789,9 @@ heap: -2,-4,-6,...
   (aref *stack-area* (1- (- (floor addr 2)))))
 
 (defun (setf stack) (new-val addr)
-  ;(format t "stack ~A <- ~A~%" addr new-val)
+					;(format t "stack ~A <- ~A~%" addr new-val)
   (let ((real-addr (1- (- (floor addr 2)))))
-    ;(format t "stack ~A = ~A~%" addr new-val)
+					;(format t "stack ~A = ~A~%" addr new-val)
     (unless (array-in-bounds-p *stack-area* real-addr)
       (adjust-array *stack-area* (* 2 real-addr)))
     (setf (aref *stack-area* real-addr) new-val)))
@@ -1750,7 +1800,7 @@ heap: -2,-4,-6,...
   (aref *register-area* num))	
 
 (defun (setf register) (new-val num)
-  ;(format t "register ~A = ~A~%" num new-val)
+					;(format t "register ~A = ~A~%" num new-val)
   (unless (array-in-bounds-p *register-area* num)
     (adjust-array *register-area* (* 2 num)))
   (setf (aref *register-area* num) new-val))
@@ -1767,7 +1817,7 @@ heap: -2,-4,-6,...
   (stack (addr+ *E* y 1)))	
 
 (defun (setf stackvar) (new-val y)
-  ;(format t "stackvar Y~A(~A) <- ~A~%" y (addr+ *E* y 1) new-val)
+					;(format t "stackvar Y~A(~A) <- ~A~%" y (addr+ *E* y 1) new-val)
   (setf (stack (addr+ *E* y 1)) new-val))
 
 (defun print-memory ()
@@ -1794,6 +1844,114 @@ heap: -2,-4,-6,...
 	 (push (funcall f i) acc))
     (reverse acc)))
 
+(defmacro backtrack-or-continue ()
+  '(if *fail* (backtrack) (setq *P* (cdr *P*))))
+
+(defun dereference (a)
+  (destructuring-bind (tag . value) (store a)
+    (if (and (eq tag 'ref) (/= value a))
+	(dereference value)
+	a)))
+
+(defun backtrack ()
+  (if (eq *B* bottom-of-stack)
+      (signal (make-condition 'prolog-query-failed))
+      (progn (setq *fail* nil)
+	     (setf *B0* (stack (addr+ *B* (stack *B*) 7)))
+	     (setf *P* (stack (addr+ *B* (stack *B*) 4))))))
+
+(defun bind (a1 a2)
+  (let ((t1 (car (store a1))) (t2 (car (store a2))))
+    (if (and (eq t1 'ref) (or (not (eq t2 'ref)) (addr< a2 a1)))
+	(progn (setf (store a1) (store a2))
+	       (set-to-trail a1))
+	(progn (setf (store a2) (store a1))
+	       (set-to-trail a2)))))
+
+(defun set-to-trail (a)
+  (when (or (addr< a *HB*) (and (addr< *H* a) (addr< a *B*)))
+    (setf (trail *TR*) a)
+    (incf *TR*)))
+
+(defun unwind-trail (a1 a2)
+  (loop for i from a1 to (1- a2) do
+					;(format t "unwind! : ~A~%" (trail i))
+       (setf (store (trail i)) (cons 'ref (trail i)))))
+
+(defun tidy-trail ()
+  (let ((i (stack (addr+ *B* (stack *B*) 5))))
+    (while (< i *TR*)
+      (if (or (addr< (trail i) *HB*) (and (addr< *H* (trail i)) (addr< (trail i) *B*)))
+	  (incf i)
+	  (progn (setf (trail i) (trail (1- *TR*)))
+		 (decf *TR*))))))
+
+(defun defined (pair)
+  (cond ((gethash pair *dispatching-code-table*) 'user-defined)
+	((gethash pair *builtin-predicate-table*) 'builtin)
+	(t nil)))
+
+(defun unify (a1 a2)
+  (let ((pdl nil))
+    (push a1 pdl) (push a2 pdl) (setq *fail* nil)
+    (loop while (not (or (null pdl) *fail*)) do
+	 (let ((d1 (dereference (pop pdl))) (d2 (dereference (pop pdl))))
+	   (when (/= d1 d2)
+	     (destructuring-bind
+		   ((t1 . v1) (t2 . v2)) (list (store d1) (store d2))
+	       (if (eq t1 'ref)
+		   (bind d1 d2)
+		   (case t2
+		     (ref (bind d1 d2))
+		     (con
+		      (setq *fail*
+			    (or (not (eq t1 'con)) (not (equal v1 v2)))))
+		     (lis
+		      (if (not (eq t1 'lis))
+			  (setq *fail* t)
+			  (progn
+			    (push v1 pdl) (push v2 pdl)
+			    (push (addr+ v1 1) pdl)
+			    (push (addr+ v2 1) pdl))))
+		     (struct
+		      (if (not (eq t1 'struct))
+			  (setq *fail* t)
+			  (progn
+			    (destructuring-bind
+				  ((f1 .  n1) (f2 . n2))
+				(list (store v1) (store v2))
+			      (if (or (not (eq f1 f2)) (/= n1 n2))
+				  (setq *fail* t)
+				  (loop for i from 1 to n1 do
+				       (push (addr+ v1 i) pdl)
+				       (push (addr+ v2 i) pdl)))))))))))))))
+
+
+(defun to-lisp-object (addr)
+  (let* ((d (dereference addr))
+	 (obj (store d)))
+    (case (car obj)
+      (ref (cons *unbound-variable* (cdr obj)))
+      (con (if (eq (cdr obj) '[])
+	       nil
+	       (cdr obj)))
+      (lis (cons (to-lisp-object (cdr obj)) (to-lisp-object (addr+ (cdr obj) 1))))
+      (struct
+       (let* ((struct-info (store (cdr obj)))
+	      (functor (car struct-info)) (arity (cdr struct-info)))
+	 (cons *structure*
+	       (cons functor
+		     (maprange (lambda (i)
+				 (to-lisp-object (addr+ (cdr obj) i))) 1 (1+ arity)))))))))
+
+(defun make-solution-result (assign-table)
+  (let (alist)
+    (mapc
+     (lambda (ele)
+       (let ((k (car ele)) (v (cdr ele)))
+	 (push (cons k (to-lisp-object (addr+ *E* (cdr v) 1))) alist))) assign-table)
+    alist))
+
 
 (defun send-query (query-code)
   (setq *P* query-code)
@@ -1813,511 +1971,740 @@ heap: -2,-4,-6,...
   (setf (stack (addr+ *B* 7)) nil)
   (setq *E* initial-value-of-E)
   (setq *fail* nil)
-  (macrolet
-      ((backtrack-or-continue ()
-	 '(if *fail* (backtrack) (setq *P* (cdr *P*)))))
-    (labels
-	((dereference (a)
-	   (destructuring-bind (tag . value) (store a)
-	     (if (and (eq tag 'ref) (/= value a))
-		 (dereference value)
-		 a)))
-	 (backtrack ()
-	   (if (eq *B* bottom-of-stack)
-	       (signal (make-condition 'prolog-query-failed))
-	       (progn (setq *fail* nil)
-		      (setf *B0* (stack (addr+ *B* (stack *B*) 7)))
-		      (setf *P* (stack (addr+ *B* (stack *B*) 4))))))
-	 (bind (a1 a2)
-	   (let ((t1 (car (store a1))) (t2 (car (store a2))))
-	     (if (and (eq t1 'ref) (or (not (eq t2 'ref)) (addr< a2 a1)))
-		 (progn (setf (store a1) (store a2))
-			(set-to-trail a1))
-		 (progn (setf (store a2) (store a1))
-			(set-to-trail a2)))))
-	 (set-to-trail (a)
-	   ;(format t "trail?... a:~A HB:~A H:~A B:~A~%" a *HB* *H* *B*)
-	   (when (or (addr< a *HB*) (and (addr< *H* a) (addr< a *B*)))
-	     ;(format t "trail! : ~A~%" a)
-	     (setf (trail *TR*) a)
-	     (incf *TR*)))
-	 (unwind-trail (a1 a2)
-	   (loop for i from a1 to (1- a2) do
-		;(format t "unwind! : ~A~%" (trail i))
-		(setf (store (trail i)) (cons 'ref (trail i)))))
-	 (tidy-trail ()
-	   (let ((i (stack (addr+ *B* (stack *B*) 5))))
-	     (while (< i *TR*)
-	       (if (or (addr< (trail i) *HB*) (and (addr< *H* (trail i)) (addr< (trail i) *B*)))
-		   (incf i)
-		   (progn (setf (trail i) (trail (1- *TR*)))
-			  (decf *TR*))))))
-	 (defined (pair)
-	   (if (gethash pair *dispatching-code-table*)
-	       t
-	       nil))
-	 (unify (a1 a2)
-	   (let ((pdl nil))
-	     (push a1 pdl) (push a2 pdl) (setq *fail* nil)
-	     (loop while (not (or (null pdl) *fail*)) do
-		  (let ((d1 (dereference (pop pdl))) (d2 (dereference (pop pdl))))
-		    (when (/= d1 d2)
-		      (destructuring-bind
-			    ((t1 . v1) (t2 . v2)) (list (store d1) (store d2))
-			(if (eq t1 'ref)
-			    (bind d1 d2)
-			    (case t2
-			      (ref (bind d1 d2))
-			      (con
-			       (setq *fail*
-				     (or (not (eq t1 'con)) (not (eq v1 v2)))))
-			      (lis
-			       (if (not (eq t1 'lis))
-				   (setq *fail* t)
-				   (progn
-				     (push v1 pdl) (push v2 pdl)
-				     (push (addr+ v1 1) pdl)
-				     (push (addr+ v2 1) pdl))))
-			      (struct
-			       (if (not (eq t1 'struct))
-				   (setq *fail* t)
-				   (progn
-				     (destructuring-bind
-					   ((f1 .  n1) (f2 . n2))
-					 (list (store v1) (store v2))
-				       (if (or (not (eq f1 f2)) (/= n1 n2))
-					   (setq *fail* t)
-					   (loop for i from 1 to n1 do
-						(push (addr+ v1 i) pdl)
-						(push (addr+ v2 i) pdl)))))))))))))))
-	 (to-lisp-object (addr)
-	   (let* ((d (dereference addr))
-		  (obj (store d)))
-	     (case (car obj)
-	       (ref *unbound-variable*)
-	       (con (cdr obj))
-	       (lis (list '|.| (to-lisp-object (cdr obj)) (to-lisp-object (addr+ (cdr obj) 1))))
-	       (struct
-		(let* ((struct-info (store (cdr obj)))
-		       (functor (car struct-info)) (arity (cdr struct-info)))
-		  (cons functor
-			(maprange (lambda (i)
-				    (to-lisp-object (addr+ (cdr obj) i))) 1 (1+ arity))))))))
-	 (make-solution-result (assign-table)
-	   (let (alist)
-	     (mapc
-	      (lambda (ele)
-		(let ((k (car ele)) (v (cdr ele)))
-		  (push (cons k (to-lisp-object (addr+ *E* (cdr v) 1))) alist))) assign-table)
-	     alist)))
-      (loop
-	 (let ((inst (car *P*)))
-	   ;(format t "next: ~A  *HB*=~A *B*=~A fail:~A~%" (car inst) *HB* *B* *fail*)
-	   (if (null inst)
-	       (return)
-	       (if (eq 'fail inst)
-		   (backtrack)
-		   (case (car inst)
-		     (notify-solution
-		      (restart-case
-			  (signal (make-condition 'prolog-found-solution
-						  :vars (make-solution-result (second inst))
-						  :can-backtrack? (/= *B* bottom-of-stack)))
-			(next-solution ()
-			  (backtrack))))
-		     (put-variable-temporary (let ((x (cadr inst)) (a (caddr inst)))
-					       (setf (heap *H*) (cons 'ref *H*))
-					       (setf (register x) (heap *H*))
-					       (setf (register a) (heap *H*))
-					       (setf *H* (addr+ *H* 1))
-					       (setq *P* (cdr *P*))))
-		     (put-variable-permanent (let* ((y (cadr inst)) (a (caddr inst))
-						    (addr (addr+ *E* y 1)))
-					       (setf (stack addr) (cons 'ref addr))
-					       (setf (register a) (stack addr))
-					       (setq *P* (cdr *P*))))
-		     (put-value-temporary (let ((x (cadr inst)) (a (caddr inst)))
-					    (setf (register a) (register x))
-					    (setq *P* (cdr *P*))))
-		     (put-value-permanent (let ((y (cadr inst)) (a (caddr inst)))
-					    (setf (register a) (stackvar y))
-					    (setq *P* (cdr *P*))))
-		     (put-unsafe-value (let* ((y (cadr inst)) (a (caddr inst))
-					      (addr (dereference (addr+ *E* y 1))))
-					 (if (addr< addr *E*)
-					     (setf (register a) (store addr))
-					     (progn
-					       (setf (heap *H*) (cons 'ref *H*))
-					       (bind addr *H*)
-					       (setf (register a) (heap *H*))
-					       (setf *H* (addr+ *H* 1))))
-					 (setq *P* (cdr *P*))))
-		     (put-structure (let ((f (cadr inst)) (a (caddr inst)))
-				      (setf (heap *H*) f)
-				      (setf (register a) (cons 'struct *H*))
-				      (setf *H* (addr+ *H* 1))
-				      (setq *P* (cdr *P*))))
-		     (put-list (let ((a (cadr inst)))
-				 (setf (register a) (cons 'lis *H*))
-				 (setq *P* (cdr *P*))))
-		     (put-constant (let ((c (cadr inst)) (a (caddr inst)))
-				     (setf (register a) (cons 'con c))
+  (loop
+     (let ((inst (car *P*)))
+       ;(format t "next: ~A  *HB*=~A *B*=~A fail:~A~%" (car inst) *HB* *B* *fail*)
+       (if (null inst)
+	   (return)
+	   (if (eq 'fail inst)
+	       (backtrack)
+	       (case (car inst)
+		 (notify-solution
+		  (restart-case
+		      (signal (make-condition 'prolog-found-solution
+					      :vars (make-solution-result (second inst))
+					      :can-backtrack? (/= *B* bottom-of-stack)))
+		    (next-solution ()
+		      (backtrack))))
+		 (put-variable-temporary (let ((x (cadr inst)) (a (caddr inst)))
+					   (setf (heap *H*) (cons 'ref *H*))
+					   (setf (register x) (heap *H*))
+					   (setf (register a) (heap *H*))
+					   (setf *H* (addr+ *H* 1))
+					   (setq *P* (cdr *P*))))
+		 (put-variable-permanent (let* ((y (cadr inst)) (a (caddr inst))
+						(addr (addr+ *E* y 1)))
+					   (setf (stack addr) (cons 'ref addr))
+					   (setf (register a) (stack addr))
+					   (setq *P* (cdr *P*))))
+		 (put-value-temporary (let ((x (cadr inst)) (a (caddr inst)))
+					(setf (register a) (register x))
+					(setq *P* (cdr *P*))))
+		 (put-value-permanent (let ((y (cadr inst)) (a (caddr inst)))
+					(setf (register a) (stackvar y))
+					(setq *P* (cdr *P*))))
+		 (put-unsafe-value (let* ((y (cadr inst)) (a (caddr inst))
+					  (addr (dereference (addr+ *E* y 1))))
+				     (if (addr< addr *E*)
+					 (setf (register a) (store addr))
+					 (progn
+					   (setf (heap *H*) (cons 'ref *H*))
+					   (bind addr *H*)
+					   (setf (register a) (heap *H*))
+					   (setf *H* (addr+ *H* 1))))
 				     (setq *P* (cdr *P*))))
-		     (set-variable-temporary (let ((x (cadr inst)))
-					       (setf (heap *H*) (cons 'ref *H*))
-					       (setf (register x) (heap *H*))
-					       (setf *H* (addr+ *H* 1))
-					       (setq *P* (cdr *P*))))
-		     (set-variable-permanent (let ((y (cadr inst)))
-					       (setf (heap *H*) (cons 'ref *H*))
-					       (setf (stackvar y) (heap *H*))
-					       (setf *H* (addr+ *H* 1))
-					       (setq *P* (cdr *P*))))
-		     (set-value-temporary (let ((x (cadr inst)))
-					    (setf (heap *H*) (register x))
-					    (setf *H* (addr+ *H* 1))
-					    (setq *P* (cdr *P*))))
-		     (set-value-permanent (let ((y (cadr inst)))
-					    (setf (heap *H*) (stack (addr+ *E* y 1)))
-					    (setf *H* (addr+ *H* 1))
-					    (setq *P* (cdr *P*))))
-		     (set-local-value-temporary
-		      (let* ((x (cadr inst))
-			     (addr (dereference x)))
-			(if (addr< addr *H*)
-			    (setf (heap *H*) (heap addr))
-			    (progn
-			      (setf (heap *H*) (cons 'ref *H*))
-			      (bind addr *H*)))
-			(setf *H* (addr+ *H* 1))
-			(setq *P* (cdr *P*))))
-		     (set-local-value-permanent
-		      (let* ((y (cadr inst))
-			     (addr (dereference (addr+ *E* y 1))))
-			(if (addr< addr *H*)
-			    (setf (heap *H*) (heap addr))
-			    (progn
-			      (setf (heap *H*) (cons 'ref *H*))
-			      (bind addr *H*)))
-			(setf *H* (addr+ *H* 1))
-			(setq *P* (cdr *P*))))
-		     (set-constant (let ((c (cadr inst)))
-				     (setf (heap *H*) (cons 'con c))
-				     (setf *H* (addr+ *H* 1))
-				     (setq *P* (cdr *P*))))
-		     (set-void (let ((n (cadr inst)))
-				 (dotimes (i n)
-				   (setf (heap (addr+ *H* i)) (cons 'ref (addr+ *H* i))))
-				 (setf *H* (addr+ *H* n))
+		 (put-structure (let ((f (cadr inst)) (a (caddr inst)))
+				  (setf (heap *H*) f)
+				  (setf (register a) (cons 'struct *H*))
+				  (setf *H* (addr+ *H* 1))
+				  (setq *P* (cdr *P*))))
+		 (put-list (let ((a (cadr inst)))
+			     (setf (register a) (cons 'lis *H*))
+			     (setq *P* (cdr *P*))))
+		 (put-constant (let ((c (cadr inst)) (a (caddr inst)))
+				 (setf (register a) (cons 'con c))
 				 (setq *P* (cdr *P*))))
-		     (get-variable-temporary
-		      (let ((x (cadr inst)) (a (caddr inst)))
-			(setf (register x) (register a))
-			(setq *P* (cdr *P*))))
-		     (get-variable-permanent
-		      (let ((y (cadr inst)) (a (caddr inst)))
-			(setf (stackvar y) (register a))
-			(setq *P* (cdr *P*))))
-		     (get-value-temporary
-		      (let ((x (cadr inst)) (a (caddr inst)))
-			(unify x a)
-			(backtrack-or-continue)))
-		     (get-value-permanent
-		      (let ((y (cadr inst)) (a (caddr inst)))
-			(unify (addr+ *E* y 1) a)
-			(backtrack-or-continue)))
-		     (get-structure
-		      (let* ((f (cadr inst)) (a (caddr inst))
-			     (addr (dereference a)))
-			(case (car (store addr))
-			  (ref (setf (heap *H*) (cons 'struct (addr+ *H* 1)))
-			       (setf (heap (addr+ *H* 1)) f)
-			       (bind addr *H*)
-			       (setf *H* (addr+ *H* 2))
-			       (setq *mode* 'write))
-			  (struct (let ((struct-addr (cdr (store addr))))
-				    (if (equal (heap struct-addr) f)
-					(progn
-					  (setf *S* (addr+ struct-addr 1))
-					  (setq *mode* 'read))
-					(setq *fail* t))))
-			  (t (setq *fail* t)))
-			(backtrack-or-continue)))
-		     (get-list (let* ((a (cadr inst))
-				      (addr (dereference a)))
-				 (case (car (store addr))
-				   (ref (setf (heap *H*) (cons 'lis (addr+ *H* 1)))
-					(bind addr *H*)
+		 (set-variable-temporary (let ((x (cadr inst)))
+					   (setf (heap *H*) (cons 'ref *H*))
+					   (setf (register x) (heap *H*))
+					   (setf *H* (addr+ *H* 1))
+					   (setq *P* (cdr *P*))))
+		 (set-variable-permanent (let ((y (cadr inst)))
+					   (setf (heap *H*) (cons 'ref *H*))
+					   (setf (stackvar y) (heap *H*))
+					   (setf *H* (addr+ *H* 1))
+					   (setq *P* (cdr *P*))))
+		 (set-value-temporary (let ((x (cadr inst)))
+					(setf (heap *H*) (register x))
 					(setf *H* (addr+ *H* 1))
-					(setq *mode* 'write))
-				   (lis (let ((list-addr (cdr (store addr))))
-					  (setf *S* list-addr)
-					  (setq *mode* 'read)))
+					(setq *P* (cdr *P*))))
+		 (set-value-permanent (let ((y (cadr inst)))
+					(setf (heap *H*) (stack (addr+ *E* y 1)))
+					(setf *H* (addr+ *H* 1))
+					(setq *P* (cdr *P*))))
+		 (set-local-value-temporary
+		  (let* ((x (cadr inst))
+			 (addr (dereference x)))
+		    (if (addr< addr *H*)
+			(setf (heap *H*) (heap addr))
+			(progn
+			  (setf (heap *H*) (cons 'ref *H*))
+			  (bind addr *H*)))
+		    (setf *H* (addr+ *H* 1))
+		    (setq *P* (cdr *P*))))
+		 (set-local-value-permanent
+		  (let* ((y (cadr inst))
+			 (addr (dereference (addr+ *E* y 1))))
+		    (if (addr< addr *H*)
+			(setf (heap *H*) (heap addr))
+			(progn
+			  (setf (heap *H*) (cons 'ref *H*))
+			  (bind addr *H*)))
+		    (setf *H* (addr+ *H* 1))
+		    (setq *P* (cdr *P*))))
+		 (set-constant (let ((c (cadr inst)))
+				 (setf (heap *H*) (cons 'con c))
+				 (setf *H* (addr+ *H* 1))
+				 (setq *P* (cdr *P*))))
+		 (set-void (let ((n (cadr inst)))
+			     (dotimes (i n)
+			       (setf (heap (addr+ *H* i)) (cons 'ref (addr+ *H* i))))
+			     (setf *H* (addr+ *H* n))
+			     (setq *P* (cdr *P*))))
+		 (get-variable-temporary
+		  (let ((x (cadr inst)) (a (caddr inst)))
+		    (setf (register x) (register a))
+		    (setq *P* (cdr *P*))))
+		 (get-variable-permanent
+		  (let ((y (cadr inst)) (a (caddr inst)))
+		    (setf (stackvar y) (register a))
+		    (setq *P* (cdr *P*))))
+		 (get-value-temporary
+		  (let ((x (cadr inst)) (a (caddr inst)))
+		    (unify x a)
+		    (backtrack-or-continue)))
+		 (get-value-permanent
+		  (let ((y (cadr inst)) (a (caddr inst)))
+		    (unify (addr+ *E* y 1) a)
+		    (backtrack-or-continue)))
+		 (get-structure
+		  (let* ((f (cadr inst)) (a (caddr inst))
+			 (addr (dereference a)))
+		    (case (car (store addr))
+		      (ref (setf (heap *H*) (cons 'struct (addr+ *H* 1)))
+			   (setf (heap (addr+ *H* 1)) f)
+			   (bind addr *H*)
+			   (setf *H* (addr+ *H* 2))
+			   (setq *mode* 'write))
+		      (struct (let ((struct-addr (cdr (store addr))))
+				(if (equal (heap struct-addr) f)
+				    (progn
+				      (setf *S* (addr+ struct-addr 1))
+				      (setq *mode* 'read))
+				    (setq *fail* t))))
+		      (t (setq *fail* t)))
+		    (backtrack-or-continue)))
+		 (get-list (let* ((a (cadr inst))
+				  (addr (dereference a)))
+			     (case (car (store addr))
+			       (ref (setf (heap *H*) (cons 'lis (addr+ *H* 1)))
+				    (bind addr *H*)
+				    (setf *H* (addr+ *H* 1))
+				    (setq *mode* 'write))
+			       (lis (let ((list-addr (cdr (store addr))))
+				      (setf *S* list-addr)
+				      (setq *mode* 'read)))
+			       (t (setq *fail* t)))
+			     (backtrack-or-continue)))
+		 (get-constant (let* ((c (cadr inst)) (a (caddr inst))
+				     (addr (dereference a)))
+				 (case (car (store addr))
+				   (ref (setf (store addr) (cons 'con c))
+					(set-to-trail addr))
+				   (con (let ((c2 (cdr (store addr))))
+					  (if (not (equal c c2))
+					      (setq *fail* t))))
 				   (t (setq *fail* t)))
 				 (backtrack-or-continue)))
-		     (get-constant (let* ((c (cadr inst)) (a (caddr inst))
-					  (addr (dereference a)))
-				     (case (car (store addr))
-				       (ref (setf (store addr) (cons 'con c))
-					    (set-to-trail addr))
-				       (con (let ((c2 (cdr (store addr))))
-					      (if (not (equal c c2))
-						  (setq *fail* t))))
-				       (t (setq *fail* t)))
-				     (backtrack-or-continue)))
-		     (unify-variable-temporary
-		      (let ((x (cadr inst)))
-			(case *mode*
-			  (read (setf (register x) (heap *S*))
-				(setf *S* (addr+ *S* 1)))
-			  (write
-			   (setf (heap *H*) (cons 'ref *H*))
-			   (setf (register x) (heap *H*))
-			   (setf *H* (addr+ *H* 1))))
+		 (unify-variable-temporary
+		  (let ((x (cadr inst)))
+		    (case *mode*
+		      (read (setf (register x) (heap *S*))
+			    (setf *S* (addr+ *S* 1)))
+		      (write
+		       (setf (heap *H*) (cons 'ref *H*))
+		       (setf (register x) (heap *H*))
+		       (setf *H* (addr+ *H* 1))))
+		    (setq *P* (cdr *P*))))
+		 (unify-variable-permanent
+		  (let ((y (cadr inst)))
+		    (case *mode*
+		      (read (setf (stackvar y) (heap *S*))
+			    (setf *S* (addr+ *S* 1)))
+		      (write
+		       (setf (heap *H*) (cons 'ref *H*))
+		       (setf (stackvar y) (heap *H*))
+		       (setf *H* (addr+ *H* 1))))
+		    (setq *P* (cdr *P*))))
+		 (unify-value-temporary
+		  (let ((x (cadr inst)))
+		    (case *mode*
+		      (read (unify x *S*)
+			    (setf *S* (addr+ *S* 1)))
+		      (write (setf (heap *H*) (register x))
+			     (setf *H* (addr+ *H* 1))))
+		    (backtrack-or-continue)))
+		 (unify-value-permanent
+		  (let ((y (cadr inst)))
+		    (case *mode*
+		      (read (unify (addr+ *E* y 1) *S*)
+			    (setf *S* (addr+ *S* 1)))
+		      (write (setf (heap *H*) (stackvar y))
+			     (setf *H* (addr+ *H* 1))))
+		    (backtrack-or-continue)))
+		 (unify-local-value-temporary
+		  (let ((x (cadr inst)))
+		    (case *mode*
+		      (read (unify x *S*)
+			    (setf *S* (addr+ *S* 1)))
+		      (write (let ((addr (dereference x)))
+			       (if (addr< addr *H*)
+				   (setf (heap *H*) (heap addr))
+				   (progn
+				     (setf (heap *H*) (cons 'ref *H*))
+				     (bind addr *H*)))
+			       (setf *H* (addr+ *H* 1)))))
+		    (backtrack-or-continue)))
+		 (unify-local-value-permanent
+		  (let ((y (cadr inst)))
+		    (case *mode*
+		      (read (unify (addr+ *E* y 1) *S*)
+			    (setf *S* (addr+ *S* 1)))
+		      (write (let ((addr (dereference (addr+ *E* y 1))))
+			       (if (addr< addr *H*)
+				   (setf (heap *H*) (heap addr))
+				   (progn
+				     (setf (heap *H*) (cons 'ref *H*))
+				     (bind addr *H*)))
+			       (setf *H* (addr+ *H* 1)))))
+		    (backtrack-or-continue)))
+		 (unify-constant
+		  (let ((c (cadr inst)))
+		    (case *mode*
+		      (read (let ((addr (dereference *S*)))
+			      (case (car (store addr))
+				(ref (setf (store addr) (cons 'con c))
+				     (set-to-trail addr))
+				(con (if (not (equal (cdr (store addr)) c))
+					 (setq *fail* t)))
+				(t (setq *fail* t)))
+			      (setf *S* (addr+ *S* 1))))
+		      (write (setf (heap *H*) (cons 'con c))
+			     (setf *H* (addr+ *H* 1))))
+		    (backtrack-or-continue)))
+		 (unify-void
+		  (let ((n (cadr inst)))
+		    (case *mode*
+		      (read (setf *S* (addr+ *S* n)))
+		      (write (dotimes (i n)
+			       (setf (heap (addr+ *H* i)) (cons 'ref (addr+ *H* i))))
+			     (setf *H* (addr+ *H* n))))
+		    (setq *P* (cdr *P*))))
+		 (allocate
+		  (let ((new-E
+			 (if (addr< *B* *E*)
+			     (addr+ *E* (car (last (car *CP*)))  2)
+			     (addr+ *B* (stack *B*) 8))))
+		    (setf (stack new-E) *E*)
+		    (setf (stack (addr+ new-E 1)) *CP*)
+		    (setf *E* new-E)
+		    (setq *P* (cdr *P*))))
+		 (deallocate
+		  (setf *CP* (stack (addr+ *E* 1)))
+		  (setf *E* (stack *E*))
+		  (setq *P* (cdr *P*)))
+		 (allocate-for-query
+		  (let ((new-E (addr+ *B* (stack *B*) 8)))
+		    (setf (stack new-E) nil)
+		    (setf (stack (addr+ new-E 1)) *P*)
+		    (setf *E* new-E)
+		    (setq *P* (cdr *P*))))
+		 (call (let ((pair (cadr inst)))
+			 (case (defined pair)
+			   (user-defined
+			    (setf *CP* (cdr *P*))
+			    (setf *num-of-args* (cdr pair))
+			    (setf *B0* *B*)
+			    (setf *P* (gethash pair *dispatching-code-table*)))
+			   (builtin
+			    (setf *CP* (cdr *P*))
+			    (setf *num-of-args* (cdr pair))
+			    (setf *B0* *B*)
+			    (apply (gethash pair *builtin-predicate-table*)
+				   (maprange #'identity 1 (1+ *num-of-args*))))
+			   (t (backtrack)))))
+		 (execute (let ((pair (cadr inst)))
+			    (case (defined pair)
+			      (user-defined
+			       (setf *num-of-args* (cdr pair))
+			       (setf *B0* *B*)
+			       (setf *P* (gethash pair *dispatching-code-table*)))
+			      (builtin
+			       (setf *num-of-args* (cdr pair))
+			       (setf *B0* *B*)
+			       (apply (gethash pair *builtin-predicate-table*)
+				      (maprange #'identity 1 (1+ *num-of-args*))))
+			      (t (backtrack)))))
+		 (proceed
+		  (setf *P* *CP*))
+		 (try-me-else
+		  (let* ((l (third inst))
+			 ;;(second inst)にはラベルのシンボルが入ってる（表示用）
+			 ;;(third inst)に、ラベルの次の命令へのポインタが入ってる
+			 (new-B
+			  (if (addr< *B* *E*)
+			      (addr+ *E* (car (last (car *CP*))) 2)
+			      (addr+ *B* (stack *B*) 8)))
+			 (n *num-of-args*))
+		    (setf (stack new-B) *num-of-args*)
+		    (dotimes (i n)
+		      (setf (stack (addr+ new-B (1+ i))) (register (1+ i))))
+		    (setf (stack (addr+ new-B n 1)) *E*)
+		    (setf (stack (addr+ new-B n 2)) *CP*)
+		    (setf (stack (addr+ new-B n 3)) *B*)
+		    (setf (stack (addr+ new-B n 4)) l)
+		    (setf (stack (addr+ new-B n 5)) *TR*)
+		    (setf (stack (addr+ new-B n 6)) *H*)
+		    (setf (stack (addr+ new-B n 7)) *B0*)
+		    (setf *B* new-B)
+		    (setf *HB* *H*)
+		    (setq *P* (cdr *P*))))
+		 (retry-me-else
+		  (let ((l (third inst))
+			(n (stack *B*)))
+		    (setf *num-of-args* n)
+		    (dotimes (i n)
+		      (setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
+		    (setf *E* (stack (addr+ *B* n 1)))
+		    (setf *CP* (stack (addr+ *B* n 2)))
+		    (setf (stack (addr+ *B* n 4)) l)
+		    (unwind-trail (stack (addr+ *B* n 5)) *TR*)
+		    (setf *TR* (stack (addr+ *B* n 5)))
+		    (setf *H* (stack (addr+ *B* n 6)))
+		    (setf *HB* *H*)
+		    (setq *P* (cdr *P*))))
+		 (trust-me (let ((n (stack *B*)))
+			     (setf *num-of-args* n)
+			     (dotimes (i n)
+			       (setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
+			     (setf *E* (stack (addr+ *B* n 1)))
+			     (setf *CP* (stack (addr+ *B* n 2)))
+			     (unwind-trail (stack (addr+ *B* n 5)) *TR*)
+			     (setf *TR* (stack (addr+ *B* n 5)))
+			     (setf *H* (stack (addr+ *B* n 6)))
+			     (setf *B* (stack (addr+ *B* n 3)))
+			     (setf *HB* (stack (addr+ *B* (stack *B*) 6)))
+			     (setq *P* (cdr *P*))))
+		 (try
+		  (let* ((l (third inst))
+			 (new-B
+			  (if (addr< *B* *E*)
+			      (addr+ *E* (car (last (car (stack (addr+ *E* 1))))) 2)
+			      (addr+ *B* (stack *B*) 8)))
+			 (n *num-of-args*))
+		    (setf (stack new-B) *num-of-args*)
+		    (dotimes (i n)
+		      (setf (stack (addr+ new-B (1+ i))) (register (1+ i))))
+		    (setf (stack (addr+ new-B n 1)) *E*)
+		    (setf (stack (addr+ new-B n 2)) *CP*)
+		    (setf (stack (addr+ new-B n 3)) *B*)
+		    (setf (stack (addr+ new-B n 4)) (cdr *P*))
+		    (setf (stack (addr+ new-B n 5)) *TR*)
+		    (setf (stack (addr+ new-B n 6)) *H*)
+		    (setf (stack (addr+ new-B n 7)) *B0*)
+		    (setf *B* new-B)
+		    (setf *HB* *H*)
+		    (setf *P* l)))
+		 (retry (let ((l (third inst))
+			      (n (stack *B*)))
+			  (setf *num-of-args* n)
+			  (dotimes (i n)
+			    (setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
+			  (setf *E* (stack (addr+ *B* n 1)))
+			  (setf *CP* (stack (addr+ *B* n 2)))
+			  (setf (stack (addr+ *B* n 4)) (cdr *P*))
+			  (unwind-trail (stack (addr+ *B* n 5)) *TR*)
+			  (setf *TR* (stack (addr+ *B* n 5)))
+			  (setf *H* (stack (addr+ *B* n 6)))
+			  (setf *HB* *H*)
+			  (setf *P* l)))
+		 (trust (let ((l (third inst))
+			      (n (stack *B*)))
+			  (setf *num-of-args* n)
+			  (dotimes (i n)
+			    (setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
+			  (setf *E* (stack (addr+ *B* n 1)))
+			  (setf *CP* (stack (addr+ *B* n 2)))
+			  (unwind-trail (stack (addr+ *B* n 5)) *TR*)
+			  (setf *TR* (stack (addr+ *B* n 5)))
+			  (setf *H* (stack (addr+ *B* n 6)))
+			  (setf *B* (stack (addr+ *B* n 3)))
+			  (setf *HB* (stack (addr+ *B* (stack *B*) 6)))
+			  (setf *P* l)))
+		 (switch-on-term (let ((v (sixth inst)) (c (seventh inst))
+				       (l (eighth inst)) (s (ninth inst)))
+				   (case (car (store (dereference 1)))
+				     (ref (setf *P* v))
+				     (con (setf *P* c))
+				     (lis (setf *P* l))
+				     (struct (setf *P* s)))))
+		 (switch-on-constant
+		  (let* ((ht (third inst))
+			 (val (cdr (store (dereference 1))))
+			 (result (gethash val ht)))
+		    (if result
+			(setf *P* result)
+			(backtrack))))
+		 (switch-on-structure
+		  (let* ((ht (third inst))
+			 (val (cdr (store (dereference 1))))
+			 (result (gethash val ht)))
+		    (if result
+			(setf *P* result)
+			(backtrack))))
+		 (neck-cut (when (addr< *B0* *B*)
+			     (setq *B* *B0*)
+			     (tidy-trail))
+			   (setq *P* (cdr *P*))) 
+		 (get-level (let ((y (cadr inst)))
+			      (setf (stack (addr+ *E* 2 y)) *B0*)))
+		 (cut (let ((y (cadr inst)))
+			(when (addr< (stack (addr+ *E* 2 y)) *B*)
+			  (setf *B* (stack (addr+ *E* 2 y)))
+			  (tidy-trail))
 			(setq *P* (cdr *P*))))
-		     (unify-variable-permanent
-		      (let ((y (cadr inst)))
-			(case *mode*
-			  (read (setf (stackvar y) (heap *S*))
-				(setf *S* (addr+ *S* 1)))
-			  (write
-			   (setf (heap *H*) (cons 'ref *H*))
-			   (setf (stackvar y) (heap *H*))
-			   (setf *H* (addr+ *H* 1))))
-			(setq *P* (cdr *P*))))
-		     (unify-value-temporary
-		      (let ((x (cadr inst)))
-			(case *mode*
-			  (read (unify x *S*)
-				(setf *S* (addr+ *S* 1)))
-			  (write (setf (heap *H*) (register x))
-				 (setf *H* (addr+ *H* 1))))
-			(backtrack-or-continue)))
-		     (unify-value-permanent
-		      (let ((y (cadr inst)))
-			(case *mode*
-			  (read (unify (addr+ *E* y 1) *S*)
-				(setf *S* (addr+ *S* 1)))
-			  (write (setf (heap *H*) (stackvar y))
-				 (setf *H* (addr+ *H* 1))))
-			(backtrack-or-continue)))
-		     (unify-local-value-temporary
-		      (let ((x (cadr inst)))
-			(case *mode*
-			  (read (unify x *S*)
-				(setf *S* (addr+ *S* 1)))
-			  (write (let ((addr (dereference x)))
-				   (if (addr< addr *H*)
-				       (setf (heap *H*) (heap addr))
-				       (progn
-					 (setf (heap *H*) (cons 'ref *H*))
-					 (bind addr *H*)))
-				   (setf *H* (addr+ *H* 1)))))
-			(backtrack-or-continue)))
-		     (unify-local-value-permanent
-		      (let ((y (cadr inst)))
-			(case *mode*
-			  (read (unify (addr+ *E* y 1) *S*)
-				(setf *S* (addr+ *S* 1)))
-			  (write (let ((addr (dereference (addr+ *E* y 1))))
-				   (if (addr< addr *H*)
-				       (setf (heap *H*) (heap addr))
-				       (progn
-					 (setf (heap *H*) (cons 'ref *H*))
-					 (bind addr *H*)))
-				   (setf *H* (addr+ *H* 1)))))
-			(backtrack-or-continue)))
-		     (unify-constant
-		      (let ((c (cadr inst)))
-			(case *mode*
-			  (read (let ((addr (dereference *S*)))
-				  (case (car (store addr))
-				    (ref (setf (store addr) (cons 'con c))
-					 (set-to-trail addr))
-				    (con (if (not (equal (cdr (store addr)) c))
-					     (setq *fail* t)))
-				    (t (setq *fail* t)))
-				  (setf *S* (addr+ *S* 1))))
-			  (write (setf (heap *H*) (cons 'con c))
-				 (setf *H* (addr+ *H* 1))))
-			(backtrack-or-continue)))
-		     (unify-void
-		      (let ((n (cadr inst)))
-			(case *mode*
-			  (read (setf *S* (addr+ *S* n)))
-			  (write (dotimes (i n)
-				   (setf (heap (addr+ *H* i)) (cons 'ref (addr+ *H* i))))
-				 (setf *H* (addr+ *H* n))))
-			(setq *P* (cdr *P*))))
-		     (allocate
-		      (let ((new-E
-			     (if (addr< *B* *E*)
-				 (addr+ *E* (car (last (car *CP*)))  2)
-				 (addr+ *B* (stack *B*) 8))))
-			(setf (stack new-E) *E*)
-			(setf (stack (addr+ new-E 1)) *CP*)
-			;(format t "~%~% alocate *CP*~A~%~%" *CP*)
-			(setf *E* new-E)
-			(setq *P* (cdr *P*))))
-		     (deallocate
-		      (setf *CP* (stack (addr+ *E* 1)))
-		      (setf *E* (stack *E*))
-		      (setq *P* (cdr *P*)))
-		     (allocate-for-query
-		      (let ((new-E (addr+ *B* (stack *B*) 8)))
-			(setf (stack new-E) nil)
-			(setf (stack (addr+ new-E 1)) *P*)
-			(setf *E* new-E)
-			(setq *P* (cdr *P*))))
-		     (call (let ((pair (cadr inst)))
-			     (if (defined pair)
-				 (progn (setf *CP* (cdr *P*))
-					;(format t "~%~% call *CP*=~A~%~%" *CP*)
-					(setf *num-of-args* (cdr pair))
-					(setf *B0* *B*)
-					(setf *P* (gethash pair *dispatching-code-table*)))
-				 (backtrack))))
-		     (execute (let ((pair (cadr inst)))
-				(if (defined pair)
-				    (progn (setf *num-of-args* (cdr pair))
-					   (setf *B0* *B*)
-					   (setf *P*
-						 (gethash pair *dispatching-code-table*)))
-				    (backtrack))))
-		     (proceed
-		      (setf *P* *CP*))
-		     (try-me-else
-		      (let* ((l (third inst))
-			     ;;(second inst)にはラベルのシンボルが入ってる（表示用）
-			     ;;(third inst)に、ラベルの次の命令へのポインタが入ってる
-			     (new-B
-			      (if (addr< *B* *E*)
-				  (addr+ *E* (car (last (car *CP*))) 2)
-				  (addr+ *B* (stack *B*) 8)))
-			     (n *num-of-args*))
-			;(format t "~A new-B=~A (last N=~A) ~%"
-			;	(addr< *B* *E*) new-B (car (last (car (stack (addr+ *E* 1))))))
-			(setf (stack new-B) *num-of-args*)
-			(dotimes (i n)
-			  (setf (stack (addr+ new-B (1+ i))) (register (1+ i))))
-			(setf (stack (addr+ new-B n 1)) *E*)
-			(setf (stack (addr+ new-B n 2)) *CP*)
-			(setf (stack (addr+ new-B n 3)) *B*)
-			(setf (stack (addr+ new-B n 4)) l)
-			(setf (stack (addr+ new-B n 5)) *TR*)
-			(setf (stack (addr+ new-B n 6)) *H*)
-			(setf (stack (addr+ new-B n 7)) *B0*)
-			(setf *B* new-B)
-			(setf *HB* *H*)
-			(setq *P* (cdr *P*))))
-		     (retry-me-else
-		      (let ((l (third inst))
-			    (n (stack *B*)))
-			(setf *num-of-args* n)
-			(dotimes (i n)
-			  (setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
-			(setf *E* (stack (addr+ *B* n 1)))
-			(setf *CP* (stack (addr+ *B* n 2)))
-			(setf (stack (addr+ *B* n 4)) l)
-			(unwind-trail (stack (addr+ *B* n 5)) *TR*)
-			(setf *TR* (stack (addr+ *B* n 5)))
-			(setf *H* (stack (addr+ *B* n 6)))
-			(setf *HB* *H*)
-			(setq *P* (cdr *P*))))
-		     (trust-me (let ((n (stack *B*)))
-				 (setf *num-of-args* n)
-				 (dotimes (i n)
-				   (setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
-				 (setf *E* (stack (addr+ *B* n 1)))
-				 (setf *CP* (stack (addr+ *B* n 2)))
-				 (unwind-trail (stack (addr+ *B* n 5)) *TR*)
-				 (setf *TR* (stack (addr+ *B* n 5)))
-				 (setf *H* (stack (addr+ *B* n 6)))
-				 (setf *B* (stack (addr+ *B* n 3)))
-				 (setf *HB* (stack (addr+ *B* (stack *B*) 6)))
-				 (setq *P* (cdr *P*))))
-		     (try
-		      (let* ((l (third inst))
-			     (new-B
-			      (if (addr< *B* *E*)
-				  (addr+ *E* (car (last (car (stack (addr+ *E* 1))))) 2)
-				  (addr+ *B* (stack *B*) 8)))
-			     (n *num-of-args*))
-			(setf (stack new-B) *num-of-args*)
-			(dotimes (i n)
-			  (setf (stack (addr+ new-B (1+ i))) (register (1+ i))))
-			(setf (stack (addr+ new-B n 1)) *E*)
-			(setf (stack (addr+ new-B n 2)) *CP*)
-			(setf (stack (addr+ new-B n 3)) *B*)
-			(setf (stack (addr+ new-B n 4)) (cdr *P*))
-			(setf (stack (addr+ new-B n 5)) *TR*)
-			(setf (stack (addr+ new-B n 6)) *H*)
-			(setf (stack (addr+ new-B n 7)) *B0*)
-			(setf *B* new-B)
-			(setf *HB* *H*)
-			(setf *P* l)))
-		     (retry (let ((l (third inst))
-				  (n (stack *B*)))
-			      (setf *num-of-args* n)
-			      (dotimes (i n)
-				(setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
-			      (setf *E* (stack (addr+ *B* n 1)))
-			      (setf *CP* (stack (addr+ *B* n 2)))
-			      (setf (stack (addr+ *B* n 4)) (cdr *P*))
-			      (unwind-trail (stack (addr+ *B* n 5)) *TR*)
-			      (setf *TR* (stack (addr+ *B* n 5)))
-			      (setf *H* (stack (addr+ *B* n 6)))
-			      (setf *HB* *H*)
-			      (setf *P* l)))
-		     (trust (let ((l (third inst))
-				  (n (stack *B*)))
-			      (setf *num-of-args* n)
-			      (dotimes (i n)
-				(setf (register (1+ i)) (stack (addr+ *B* (1+ i)))))
-			      (setf *E* (stack (addr+ *B* n 1)))
-			      (setf *CP* (stack (addr+ *B* n 2)))
-			      (unwind-trail (stack (addr+ *B* n 5)) *TR*)
-			      (setf *TR* (stack (addr+ *B* n 5)))
-			      (setf *H* (stack (addr+ *B* n 6)))
-			      (setf *B* (stack (addr+ *B* n 3)))
-			      (setf *HB* (stack (addr+ *B* (stack *B*) 6)))
-			      (setf *P* l)))
-		     (switch-on-term (let ((v (sixth inst)) (c (seventh inst))
-					   (l (eighth inst)) (s (ninth inst)))
-				       ;(format t "switch=>~A~%" (store (dereference 1)))
-				       (case (car (store (dereference 1)))
-					 (ref (setf *P* v))
-					 (con (setf *P* c))
-					 (lis (setf *P* l))
-					 (struct (setf *P* s)))))
-		     (switch-on-constant
-		      (let* ((ht (third inst))
-			     (val (cdr (store (dereference 1))))
-			     (result (gethash val ht)))
-			(if result
-			    (setf *P* result)
-			    (backtrack))))
-		     (switch-on-structure
-		      (let* ((ht (third inst))
-			     (val (cdr (store (dereference 1))))
-			     (result (gethash val ht)))
-			(if result
-			    (setf *P* result)
-			    (backtrack))))
-		     (neck-cut (when (addr< *B0* *B*)
-				 (setq *B* *B0*)
-				 (tidy-trail))
-			       (setq *P* (cdr *P*))) 
-		     (get-level (let ((y (cadr inst)))
-				  (setf (stack (addr+ *E* 2 y)) *B0*)))
-		     (cut (let ((y (cadr inst)))
-			    (when (addr< (stack (addr+ *E* 2 y)) *B*)
-			      (setf *B* (stack (addr+ *E* 2 y)))
-			      (tidy-trail))
-			    (setq *P* (cdr *P*))))
-		     (label
-		      (setq *P* (cdr *P*)))
-		     (otherwise (error
-				 (make-condition
-				  'prolog-bad-instruction-error :inst (car inst))))))))))))
+		 (label
+		  (setq *P* (cdr *P*)))
+		 (otherwise (error
+			     (make-condition
+			      'prolog-bad-instruction-error :inst (car inst))))))))))
 
+
+(defun find-tree (ele tree &key (test #'eq))
+  (cond ((consp tree)
+	 (or
+	  (find-tree ele (car tree) :test test)
+	  (find-tree ele (cdr tree) :test test)))
+	(t (funcall test ele tree))))
+
+(defun prolog-contain-unbound-p (obj)
+  (find-tree *unbound-variable* obj))
+
+(defun prolog-structure-p (obj)
+  (eq (car obj) *structure*))
+
+(defun prolog-structure-arity (obj)
+  (length (cddr obj)))
+
+;;空リストはダメ
+(defun wam-place-compound-on-heap (compound)
+  (labels ((push-heap (v)
+	     ;(format t "push-heap ~A(~A)~%" v *H*)
+	     (setf (heap *H*) v)
+	     (setq *H* (addr+ *H* 1))))
+    (cond ((null compound)
+	   (cons 'con '[]))
+	  ((atom compound)
+	   (cons 'con compound))
+	  ((eq *unbound-variable* (car compound))
+	   (cons 'ref (cdr compound)))
+	  ((eq *structure* (car compound))
+	   (let* ((arg-values
+		   (mapcar (lambda (arg)
+			     (wam-place-compound-on-heap arg)) (cddr compound)))
+		  (placed-addr *H*))
+	     (push-heap (cons (second compound) (length (cddr compound))))
+	     (mapc #'push-heap arg-values)
+	     (push-heap (cons 'struct placed-addr))
+	     (cons 'ref (addr+ *H* -1))))
+	  (t
+	   (let* ((arg-value1 (wam-place-compound-on-heap (car compound)))
+		  (arg-value2 (wam-place-compound-on-heap (cdr compound)))
+		  (placed-addr *H*))
+	     (push-heap arg-value1)
+	     (push-heap arg-value2)
+	     (push-heap (cons 'lis placed-addr))
+	     (cons 'ref (addr+ *H* -1)))))))
+
+;;アドレス指定の単一化
+(defun unify-aa (a1 a2)
+  (unify a1 a2))
+
+;;アドレス,値指定の単一化
+(defun unify-av (a v)
+  (labels ((get-constant (c a)
+	     (let ((addr (dereference a)))
+	       (case (car (store addr))
+		 (ref (setf (store addr) (cons 'con c))
+		      (set-to-trail addr))
+		 (con (let ((c2 (cdr (store addr))))
+			(if (not (equal c c2))
+			    (setq *fail* t))))
+		 (t (setq *fail* t))))))
+    (cond ((null v) (get-constant '[] a))
+	  ((atom v) (get-constant v a))
+	  ((eq *unbound-variable* (car v)) (unify (cdr v) a))
+	  (t (unify (cdr (wam-place-compound-on-heap v)) a)))))
+	  
+;;値同士の単一化（未束縛変数が内包されている時など）
+(defun unify-vv (v1 v2)
+  (cond ((or (null v1) (atom v1)) (if (not (equal v1 v2)) (setq *fail* t)))
+	(t (unify (wam-place-compound-on-heap v1) (wam-place-compound-on-heap v2)))))
+
+
+(defun wamdata-tag (a)
+  (car (store (dereference a))))
+
+(defun wamdata-content (a)
+  (cdr (store (dereference a))))
+	      
+(defun wamdata-constant-p (a)
+  (eq (wamdata-tag a) 'con))
+
+(defun wamdata-list-p (a)
+  (eq (wamdata-tag a) 'lis))
+
+(defun wamdata-struct-p (a)
+  (eq (wamdata-tag a) 'struct))
+
+(defun wamdata-unbound-p (a)
+  (eq (wamdata-tag a) 'ref))
+
+(defun wamdata-number-p (a)
+  (and (wamdata-constant-p a) (numberp (wamdata-content a))))
+
+(defun wamdata-atom-p (a)
+  (and (wamdata-constant-p a) (symbolp (wamdata-content a))))
+
+#|
+(defmacro prolog-success ()
+  `(setf *P* *CP*))
+
+(defmacro prolog-fail ()
+  `(backtrack))
+|#
+
+(defmacro prolog-error (predicate-name cause)
+  `(error (make-condition 'prolog-builtin-predicate-error
+			  :predicate ,predicate-name :cause ,cause)))
+
+;;成立しなければfail
+(defmacro prolog-assert (functor arity cause expr)
+  `(unless ,expr
+     (error (make-condition 'prolog-builtin-predicate-error
+			    :predicate ',(cons functor arity) :cause ,cause))))
+
+;;何もせず関数を抜けようとするときはsuccessとなる
+(defmacro define-prolog-builtin (name arg-list &body body)
+  (let ((flag (gensym)) (exit (gensym)))
+    `(setf (gethash ',(cons (intern name) (length arg-list)) *builtin-predicate-table*)
+	   (lambda ,arg-list
+	     (declare (ignorable ,@arg-list))
+	     (block ,exit
+	       (let ((,flag nil))
+		 (labels ((prolog-fail ()
+			    (setq ,flag 'fail) (backtrack) (return-from ,exit))
+			  (prolog-success ()
+			    (setq ,flag 'success) (setf *P* *CP*) (return-from ,exit))
+			  (prolog-backtrack-or-continue ()
+			    (if *fail* (prolog-fail) (prolog-success))))
+		   (unwind-protect
+			,@body
+		     (unless ,flag
+		       (prolog-success))))))))))
+
+
+(define-prolog-builtin "atom" (x)
+  (if (and (wamdata-constant-p x) (symbolp x))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "atomic" (x)
+  (if (and (wamdata-constant-p x)
+	   (or (symbolp (wamdata-content x)) (numberp (wamdata-content x))))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "number" (x)
+  (if (and (wamdata-constant-p x) (numberp (wamdata-content x)))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "integer" (x)
+  (if (and (wamdata-constant-p x) (integerp (wamdata-content x)))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "float" (x)
+  (if (and (wamdata-constant-p x) (floatp (wamdata-content x)))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "compound" (x)
+  (if (or (wamdata-struct-p x) (wamdata-list-p x))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "var" (x)
+  (if (wamdata-unbound-p x)
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "nonvar" (x)
+  (if (not (wamdata-unbound-p x))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "write" (x)
+  (princ (prolog-expr->string (to-lisp-object x)) *query-io*))
+
+(define-prolog-builtin "nl" ()
+  (format *query-io* "~%"))
+
+(defun prolog-calc-expr (expr)
+  (cond ((numberp expr) expr)
+	((and (prolog-structure-p expr) (= 1 (prolog-structure-arity expr)))
+	 (case (second expr)
+	   (|+| (prolog-calc-expr (third expr)))
+	   (|-| (- (prolog-calc-expr (third expr))))
+	   (|abs| (abs (prolog-calc-expr (third expr))))
+	   (|sqrt| (sqrt (prolog-calc-expr (third expr))))
+	   (|exp| (exp (prolog-calc-expr (third expr))))
+	   (|log| (log (prolog-calc-expr (third expr))))
+	   (|sin| (sin (prolog-calc-expr (third expr))))
+	   (|cos| (cos (prolog-calc-expr (third expr))))
+	   (|tan| (tan (prolog-calc-expr (third expr))))
+	   (|atan| (atan (prolog-calc-expr (third expr))))
+	   (|truncate| (truncate (prolog-calc-expr (third expr))))
+	   (|round| (round (prolog-calc-expr (third expr))))
+	   (|ceiling| (ceiling (prolog-calc-expr (third expr))))
+	   (|floor| (floor (prolog-calc-expr (third expr))))))
+	((and (prolog-structure-p expr) (= 2 (prolog-structure-arity expr)))
+	 (case (second expr)
+	   (|+| (+ (prolog-calc-expr (third expr)) (prolog-calc-expr (fourth expr))))
+	   (|-| (- (prolog-calc-expr (third expr)) (prolog-calc-expr (fourth  expr))))
+	   (|*| (* (prolog-calc-expr (third expr)) (prolog-calc-expr (fourth expr))))
+	   (|/| (float (/ (prolog-calc-expr (third expr))
+			  (prolog-calc-expr (fourth expr)))))
+	   (|//| (truncate (prolog-calc-expr (third expr))
+			   (prolog-calc-expr (fourth expr))))
+	   (|mod| (mod (prolog-calc-expr (third expr))
+		       (prolog-calc-expr (fourth expr))))
+	   (|**| (expt (prolog-calc-expr (third expr))
+		       (prolog-calc-expr (fourth expr))))))))
+
+(define-prolog-builtin "is" (var expr)
+  (prolog-assert "is" 2 "instantiation error"
+   (not (prolog-contain-unbound-p (to-lisp-object expr))))
+  (let ((eval-result (prolog-calc-expr (to-lisp-object expr))))
+    (unify-av var eval-result)
+    (prolog-backtrack-or-continue)))
+
+(define-prolog-builtin ">" (a b)
+  (prolog-assert ">" 2 "instantiation error"
+		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
+			  (prolog-contain-unbound-p (to-lisp-object b)))))
+  (let ((result-a (prolog-calc-expr (to-lisp-object a)))
+	(result-b (prolog-calc-expr (to-lisp-object b))))
+    (if (> result-a result-b)
+	(prolog-success)
+	(prolog-fail))))
+  
+(define-prolog-builtin "<" (a b)
+  (prolog-assert "<" 2 "instantiation error"
+		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
+			  (prolog-contain-unbound-p (to-lisp-object b)))))
+  (let ((result-a (prolog-calc-expr (to-lisp-object a)))
+	(result-b (prolog-calc-expr (to-lisp-object b))))
+    (if (< result-a result-b)
+	(prolog-success)
+	(prolog-fail))))
+
+(define-prolog-builtin ">=" (a b)
+  (prolog-assert ">=" 2 "instantiation error"
+		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
+			  (prolog-contain-unbound-p (to-lisp-object b)))))
+  (let ((result-a (prolog-calc-expr (to-lisp-object a)))
+	(result-b (prolog-calc-expr (to-lisp-object b))))
+    (if (>= result-a result-b)
+	(prolog-success)
+	(prolog-fail))))
+
+(define-prolog-builtin "=<" (a b)
+  (prolog-assert "=<" 2 "instantiation error"
+		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
+			  (prolog-contain-unbound-p (to-lisp-object b)))))
+  (let ((result-a (prolog-calc-expr a))
+	(result-b (prolog-calc-expr b)))
+    (if (<= result-a result-b)
+	(prolog-success)
+	(prolog-fail))))
+
+(define-prolog-builtin "=:=" (a b)
+  (prolog-assert "=:=" 2 "instantiation error"
+		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
+			  (prolog-contain-unbound-p (to-lisp-object b)))))
+  (let ((result-a (prolog-calc-expr (to-lisp-object a)))
+	(result-b (prolog-calc-expr (to-lisp-object b))))
+    (if (= result-a result-b)
+	(prolog-success)
+	(prolog-fail))))
+
+(define-prolog-builtin "=\=" (a b)
+  (prolog-assert "=\=" 2 "instantiation error"
+		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
+			  (prolog-contain-unbound-p (to-lisp-object b)))))
+  (let ((result-a (prolog-calc-expr (to-lisp-object a)))
+	(result-b (prolog-calc-expr (to-lisp-object b))))
+    (if (/= result-a result-b)
+	(prolog-success)
+	(prolog-fail))))
+
+
+(define-prolog-builtin "==" (a b)
+  (if (equal (to-lisp-object a) (to-lisp-object b))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "\==" (a b)
+  (if (not (equal (to-lisp-object a) (to-lisp-object b)))
+      (prolog-success)
+      (prolog-fail)))
+
+(define-prolog-builtin "fail" ()
+  (prolog-fail))
+
+(define-prolog-builtin "halt" ()
+  (signal (make-condition 'prolog-escape-repl)))
+
+
+(defun univ-struct->list (struct)
+  (cons (second struct) (cddr struct)))
+
+(defun univ-list->struct (list)
+  (cons *structure* list))
+
+(define-prolog-builtin "=.." (struct list)
+  (prolog-assert "=.." 2 "instantiation error"
+		 (not (and (prolog-contain-unbound-p (to-lisp-object struct))
+			   (prolog-contain-unbound-p (to-lisp-object list)))))
+  (cond ((and (wamdata-unbound-p struct) (wamdata-list-p list))
+	 (unify-av struct (univ-list->struct (to-lisp-object list))))
+	((and (wamdata-unbound-p list) (or (wamdata-atom-p struct)
+					   (wamdata-struct-p struct)))
+	 (unify-av list (univ-struct->list (to-lisp-object struct))))
+	((and (wamdata-list-p list) (or (wamdata-atom-p struct)
+					(wamdata-struct-p struct)))
+	 (unify-av struct (univ-list->struct (to-lisp-object list))))
+	(t (prolog-fail)))
+  (prolog-backtrack-or-continue))
