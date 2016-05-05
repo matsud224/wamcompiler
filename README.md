@@ -1,8 +1,15 @@
 # README #
 
-Prologコンパイラ。Warren's abstract machine(WAM)のバイトコードへコンパイルします。
+Prologコンパイラ。CommonLispで書きました。Warren's abstract machine(WAM)のバイトコードへコンパイルします。
 
-(repl) でREPLを起動できます。
+
+```
+#!lisp
+
+(load "wamcompiler.lisp")
+(repl)
+```
+ でREPLを起動できます。
 ;で次の解表示、yで打ち切り、aで全解表示です。
 バイトコードは(show-wamcode "f" 3)で見れます。（述語f/3の場合）
 
