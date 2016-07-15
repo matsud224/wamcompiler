@@ -17,6 +17,9 @@ atom/1,var/1,is/2,findall/3,=../2,call/1,op/3等の組み込み述語を使え�
 
 SBCLでの動作を確認しました。
 
+![wam1.png](https://bitbucket.org/repo/j4KAa9/images/1997277901-wam1.png)
+![wam2.png](https://bitbucket.org/repo/j4KAa9/images/178578521-wam2.png)
+
 # 参考文献 #
 AN ABSTRACT PROLOG INSTRUCTION SET 日本語訳
 http://www.takeoka.org/~take/ailabo/prolog/wam/wam.html
