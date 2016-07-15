@@ -2118,15 +2118,20 @@ heap: -2,-4,-6,...
 					  (setf *H* (addr+ *H* 1))
 					  (setq *P* (cdr *P*))))
 		   (set-local-value-temporary
-		    (let* ((x (cadr inst))
-			   (addr (dereference x)))
-		      (if (addr< addr *H*)
-			  (setf (heap *H*) (heap addr))
-			  (progn
-			    (setf (heap *H*) (cons 'ref *H*))
-			    (bind addr *H*)))
-		      (setf *H* (addr+ *H* 1))
-		      (setq *P* (cdr *P*))))
+		    (if (eq (store (cadr inst)) 'ref) 
+			(let* ((x (cadr inst))
+			       (addr (dereference x)))
+			  (if (addr< addr *H*)
+			      (setf (heap *H*) (heap addr))
+			      (progn
+				(setf (heap *H*) (cons 'ref *H*))
+				(bind addr *H*)))
+			  (setf *H* (addr+ *H* 1))
+			  (setq *P* (cdr *P*)))
+			(let ((x (cadr inst)))
+			  (setf (heap *H*) (register x))
+			  (setf *H* (addr+ *H* 1))
+			  (setq *P* (cdr *P*)))))
 		   (set-local-value-permanent
 		    (let* ((y (cadr inst))
 			   (addr (dereference (addr+ *E* y 1))))
@@ -2242,14 +2247,18 @@ heap: -2,-4,-6,...
 		      (case *mode*
 			(read (unify x *S*)
 			      (setf *S* (addr+ *S* 1)))
-			(write (let ((addr (dereference x)))
-				 (if (addr< addr *H*)
-				     (setf (heap *H*) (heap addr))
-				     (progn
-				       (setf (heap *H*) (cons 'ref *H*))
-				       (bind addr *H*)))
-				 (setf *H* (addr+ *H* 1)))))
-		      (backtrack-or-continue)))
+			(write (if (eq (car (store x)) 'ref)
+				   (let ((addr (dereference x)))
+				     (if (addr< addr *H*)
+					 (setf (heap *H*) (heap addr))
+					 (progn
+					   (setf (heap *H*) (cons 'ref *H*))
+					   (bind addr *H*)))
+				     (setf *H* (addr+ *H* 1)))
+				   (progn
+				     (setf (heap *H*) (register x))
+				     (setf *H* (addr+ *H* 1)))))
+		      (backtrack-or-continue))))
 		   (unify-local-value-permanent
 		    (let ((y (cadr inst)))
 		      (case *mode*
@@ -2312,6 +2321,9 @@ heap: -2,-4,-6,...
 			      (setf *B0* *B*)
 			      (setf *P* (gethash pair *dispatching-code-table*)))
 			     (builtin
+			      ;;(princ "builtin-predicate call")
+			      ;;(princ pair)
+			      ;;(princ "---")
 			      (setf *CP* (cdr *P*))
 			      (setf *num-of-args* (cdr pair))
 			      (setf *B0* *B*)
@@ -2743,8 +2755,8 @@ heap: -2,-4,-6,...
   (prolog-assert "=<" 2 "instantiation error"
 		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
 			  (prolog-contain-unbound-p (to-lisp-object b)))))
-  (let ((result-a (prolog-calc-expr a))
-	(result-b (prolog-calc-expr b)))
+  (let ((result-a (prolog-calc-expr (to-lisp-object a)))
+	(result-b (prolog-calc-expr (to-lisp-object b))))
     (if (<= result-a result-b)
 	(prolog-success)
 	(prolog-fail))))
@@ -2922,3 +2934,4 @@ heap: -2,-4,-6,...
 	   (setf (gethash (cons '|current_op| 3) *predicate-type-table*) 'builtin)
 	   (register-operator (list atom priority
 				    (intern (string-upcase (symbol-name assoc)))))))))
+

@@ -90,3 +90,7 @@ member(X, [_|Y]) :- member(X, Y).
 subset([],_).
 subset([A|R],B):-member(A,B),subset(R,B).
 :-builtin_lock(subset,2).
+
+tarai(X,Y,Z,Result):-X=<Y,Result is Y,!.
+tarai(X,Y,Z,Result):-X1 is X-1,Y1 is Y-1,Z1 is Z-1,tarai(X1,Y,Z,R1),tarai(Y1,Z,X,R2),tarai(Z1,X,Y,R3),tarai(R1,R2,R3,Result).
+
