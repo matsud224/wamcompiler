@@ -3,9 +3,7 @@
 Prologコンパイラ。CommonLispで書きました。Warren's abstract machine(WAM)のバイトコードへコンパイルします。
 
 
-```
-#!lisp
-
+```lisp
 (load "wamcompiler.lisp")
 (repl)
 ```
