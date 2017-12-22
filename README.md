@@ -15,6 +15,10 @@ atom/1,var/1,is/2,findall/3,=../2,call/1,op/3等の組み込み述語を使え�
 
 SBCLでの動作を確認しました。
 
+解説記事
+「すごいPrologつくって学ぼう?!」 pp.23-37
+http://www.kitcc.org/share/lime/lime56.pdf
+
 # 参考文献 #
 AN ABSTRACT PROLOG INSTRUCTION SET 日本語訳
 http://www.takeoka.org/~take/ailabo/prolog/wam/wam.html
