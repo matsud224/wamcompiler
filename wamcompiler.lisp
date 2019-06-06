@@ -1637,6 +1637,7 @@
 (defun next-solution-prompt ()
   (loop
      (write-char #\? *query-io*)
+     (finish-output *query-io*)
      (clear-input *query-io*)
      (case (read-char *query-io*)
        ((#\n #\;)
