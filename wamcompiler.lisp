@@ -1701,6 +1701,7 @@
        (block eval-once
 	 (unless silent
 	   (write-string  "> " *query-io*))
+	 (finish-output *query-io*)
 	 (let ((find-all-solution nil))
 	   (handler-bind
 	       ((end-of-file (lambda (c)
