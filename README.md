@@ -21,8 +21,9 @@ An article of this program (in Japanese):
 http://www.kitcc.org/share/lime/lime56.pdf
 
 # References #
-* AN ABSTRACT PROLOG INSTRUCTION SET 日本語訳
+* AN ABSTRACT PROLOG INSTRUCTION SET (Japanese translation)
 http://www.takeoka.org/~take/ailabo/prolog/wam/wam.html
+    * Original: http://www.ai.sri.com/pubs/files/641.pdf
 
 * Warren's Abstract Machine: A Tutorial Reconstruction
 http://wambook.sourceforge.net/
