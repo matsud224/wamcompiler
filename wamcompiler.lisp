@@ -1,9 +1,16 @@
-;;(defun main ()
-;;  (format t "hello,world~%"))
-;;
-;;(sb-ext:save-lisp-and-die "wamcompiler"
-;;			  :toplevel #'main
-;;			  :executable t)
+(declaim (ftype (function (t) t) set-to-trail))
+(declaim (ftype (function (t) t) send-query))
+(declaim (ftype (function (t) t) prolog-expr->string))
+(declaim (ftype (function (t &optional t) t) compile-clause))
+(declaim (ftype (function (t) t) divide-head-body))
+(declaim (ftype (function (t t) t) optimize-wamcode))
+(declaim (ftype (function (t) t) skip-comment))
+(declaim (ftype (function (t) t) skip-whitespace))
+(declaim (ftype (function (t) t) read-non-alphanum-atom))
+(declaim (ftype (function (t) t) read-num))
+(declaim (ftype (function (t) t) read-quoted-atom))
+(declaim (ftype (function (t) t) read-alphanum-atom))
+(declaim (optimize (speed 3) (space 0) (debug 0) (safety 0)))
 
 (defvar *unbound-variable* (gensym))
 (defvar *structure* (gensym))
@@ -13,6 +20,8 @@
 (defvar *clause-code-table* (make-hash-table :test #'equal)) ;; key (functor . arity). 
 (defvar *dispatching-code-table* (make-hash-table :test #'equal))
 (defvar *builtin-predicate-table* (make-hash-table :test #'equal))
+
+
 
 (define-condition prolog-escape-repl (simple-condition) ())
 
@@ -75,6 +84,7 @@
 (defvar *non-alphanum-chars*
   '(#\# #\$ #\& #\* #\+ #\- #\. #\/ #\: #\< #\= #\> #\? #\@ #\^ #\~ #\\))
 
+
 (defun get-token (s)
   (skip-whitespace s)
   (let ((c (read-char s)))
@@ -89,7 +99,7 @@
 	  ((eq c #\;) (cons 'atom '|;|))
 	  ((eq c #\!) (cons 'atom '|!|))
 	  ((eq c #\') (read-quoted-atom s))
-	  ((digit-char-p c) (unread-char c s) (cons 'atom (read-int s)))
+	  ((digit-char-p c) (unread-char c s) (cons 'atom (read-num s)))
 	  ((member c *non-alphanum-chars*)
 	   (unread-char c s) (read-non-alphanum-atom s))
 	  (t (unread-char c s) (read-alphanum-atom s)))))
@@ -103,13 +113,24 @@
   (dostream (c s)
     (if (eq c #\Newline) (return nil))))
 
-(defun read-int (s)
-  (let ((acc))
+(defun parse-string-to-float (line)
+  (with-input-from-string (s line)
+    (read s nil nil)))
+
+(defun read-num (s)
+  (let* ( (acc)
+	  (point t))
     (dostream (c s)
-      (unless (digit-char-p c)
-	(unread-char c s) (return nil))
-      (setq acc (cons c acc)))
-    (parse-integer (concatenate 'string (reverse acc)))))
+	      (unless (or (digit-char-p c)
+			  (and point (equal #\. c)))
+		(unread-char c s) (return nil))
+	      (setq acc (cons c acc))
+	      (when (equal c #\.) (setq point nil)))
+    (cond ( (equal (car acc) #\.) (unread-char (car acc) s)
+	      (parse-integer (concatenate 'string (reverse (cdr acc))) ))
+	  (point (parse-integer (concatenate 'string (reverse acc)) ))
+	  (t (parse-string-to-float
+	      (concatenate 'string (reverse acc))) ))))
 
 (defun read-alphanum-atom (s)
   (let ((acc))
@@ -1074,7 +1095,7 @@
 
 (defun optimize-test (&optional (query-mode nil))
   (let ((clause (parse *standard-input*)))
-    (multiple-value-bind (head body) (devide-head-body clause)
+    (multiple-value-bind (head body) (divide-head-body clause)
       (let* ((arity-list (make-arity-list head body))
 	     (A-start (1+ (apply #'max arity-list)))
 	     (newcode (compile-clause clause query-mode)))
@@ -1105,7 +1126,7 @@
        (cons ,element ,list)
        ,list))
 
-(defun devide-head-body (clause)
+(defun divide-head-body (clause)
   (destructuring-bind
 	(head body clause-type) (cond
 				  ((and (eq (car clause) '|:-|) (= (arity clause) 2))
@@ -1180,7 +1201,7 @@
 
 
 (defun compile-clause (clause &optional (query-mode nil))
-  (multiple-value-bind (head body) (devide-head-body clause)
+  (multiple-value-bind (head body) (divide-head-body clause)
     (multiple-value-bind
 	  (assign-table register-next remain-list) (if query-mode
 						       (assign-variables-query head body)
@@ -1373,7 +1394,7 @@
 			  (cond
 			    ((cut-operator-p b)
 			     (append
-			      (if (= body-num 0)
+			      (if  (= body-num 0) 
 				  (list (list 'neck-cut))
 				  `((cut ,(cddr (assoc '|!| assign-table)))))
 			      deallocate-part))
@@ -1652,6 +1673,7 @@
      (clear-input *query-io*)))
 
 (defun join (element list)
+  (declare (optimize (speed 3) (safety 0) (space 0) (debug 0)))
   (let (acc)
     (mapl (lambda (a)
 	    (push (car a) acc)
@@ -1696,7 +1718,7 @@
 
 (defun repl (&key (silent nil) (stream *standard-input*))
   (let ((*standard-input* stream) (exit-flag nil))
-    (loop
+     (loop
        (when exit-flag
 	 (return))
        (block eval-once
@@ -1746,7 +1768,7 @@
 					(clear-input *standard-input*)
 					(return-from eval-once))))
 	     (let ((clause (parse *standard-input*)))
-	       (multiple-value-bind (head body clause-type) (devide-head-body clause)
+	       (multiple-value-bind (head body clause-type) (divide-head-body clause)
 		 (case clause-type
 		   ((fact rule)
 		    (let ((wamcode (compile-and-optimize clause head body))) 
@@ -1786,6 +1808,7 @@ heap: -2,-4,-6,...
 (defvar *heap-area*)
 (defvar *stack-area*)
 (defvar *trail-area*)
+
 (defvar *P*)
 (defvar *CP*)
 (defvar *S*)
@@ -1799,6 +1822,48 @@ heap: -2,-4,-6,...
 (defvar *num-of-args* nil)
 (defvar *mode*)
 
+
+
+(defun register (num)
+  (aref *register-area* num))	
+
+(defun (setf register) (new-val num)
+  ;;(format t "register ~A = ~A~%" num new-val)
+  (unless (array-in-bounds-p *register-area* num)
+    (adjust-array *register-area* (* 2 num)))
+  (setf (aref *register-area* num) new-val))
+
+
+(defun heap (addr)
+  (declare (optimize (speed 3) (space 0) (debug 0) (safety 0))
+	   (type fixnum addr))
+  (aref *heap-area* (1- (- (/ addr 2)))))
+
+(defun (setf heap) (new-val addr)
+  (declare (optimize (speed 3) (space 0) (debug 0) (safety 0))
+	   (type fixnum addr))
+  (let ((real-addr (1- (- (/ addr 2)))))
+  (declare (optimize (speed 3) (space 0) (debug 0) (safety 0))
+	   (type fixnum real-addr))
+    ;;(format t "heap ~A =  ~A~%" addr new-val)
+    (unless (array-in-bounds-p *heap-area* real-addr)
+      (adjust-array *heap-area* (* 2 real-addr)))
+    (setf (aref *heap-area* real-addr) new-val)))
+
+(defun stack (addr)
+  (declare (optimize (speed 3) (space 0) (debug 0) (safety 0))
+	   (type fixnum addr))
+  (aref *stack-area* (1- (- (floor addr 2)))))
+
+(defun (setf stack) (new-val addr)
+  (declare (optimize (speed 3) (space 0) (debug 0) (safety 0))
+	   (type fixnum addr))
+  ;;(format t "stack ~A <- ~A~%" addr new-val)
+  (let ((real-addr (1- (- (floor addr 2)))))
+    (declare (type fixnum real-addr))
+    (unless (array-in-bounds-p *stack-area* real-addr)
+      (adjust-array *stack-area* (* 2 real-addr)))
+    (setf (aref *stack-area* real-addr) new-val)))
 
 (defconstant bottom-of-stack -3) ;;-1はEの初期値としてつかう（初期状態でB>Eにしたいため）
 (defconstant bottom-of-heap -2)
@@ -1815,17 +1880,23 @@ heap: -2,-4,-6,...
 
 ;;第一引数はアドレス(stack or heap)
 ;;残りの引数は加算する定数
+(declaim (ftype (function (fixnum &rest fixnum) t) addr+))
 (defun addr+ (target &rest nums)
+  (declare (optimize (speed 3) (space 0) (safety 0) (debug 0)))
   (+ target (* -2 (apply #'+ nums))))
 
 
 (defun addr< (addr1 addr2)
+ (declare (optimize (speed 3) (space 0) (debug 0) (safety 0))
+	   (type fixnum addr1 addr2))
   (cond
     ((and (typep addr1 'stack-address) (typep addr2 'heap-address)) nil)
     ((and (typep addr1 'heap-address) (typep addr2 'stack-address)) t)
     (t (> addr1 addr2))))
 
 (defun store (addr)
+ (declare (optimize (speed 3) (space 0) (debug 0) (safety 0))
+	   (type fixnum addr ))
   (typecase addr
     (register-number (register addr))
     (stack-address (stack addr))
@@ -1836,35 +1907,6 @@ heap: -2,-4,-6,...
     (register-number (setf (register addr) new-val))
     (stack-address (setf (stack addr) new-val))
     (heap-address (setf (heap addr) new-val))))
-
-(defun heap (addr)
-  (aref *heap-area* (1- (- (/ addr 2)))))
-
-(defun (setf heap) (new-val addr)
-  (let ((real-addr (1- (- (/ addr 2)))))
-    ;;(format t "heap ~A =  ~A~%" addr new-val)
-    (unless (array-in-bounds-p *heap-area* real-addr)
-      (adjust-array *heap-area* (* 2 real-addr)))
-    (setf (aref *heap-area* real-addr) new-val)))
-
-(defun stack (addr)
-  (aref *stack-area* (1- (- (floor addr 2)))))
-
-(defun (setf stack) (new-val addr)
-  ;;(format t "stack ~A <- ~A~%" addr new-val)
-  (let ((real-addr (1- (- (floor addr 2)))))
-    (unless (array-in-bounds-p *stack-area* real-addr)
-      (adjust-array *stack-area* (* 2 real-addr)))
-    (setf (aref *stack-area* real-addr) new-val)))
-
-(defun register (num)
-  (aref *register-area* num))	
-
-(defun (setf register) (new-val num)
-  ;;(format t "register ~A = ~A~%" num new-val)
-  (unless (array-in-bounds-p *register-area* num)
-    (adjust-array *register-area* (* 2 num)))
-  (setf (aref *register-area* num) new-val))
 
 (defun trail (addr)
   (aref *trail-area* addr))
@@ -1886,8 +1928,10 @@ heap: -2,-4,-6,...
        (format t "H ~A : ~A~%" (* -2 (1+ i)) (heap (* -2 (1+ i)))))
   (format t "--------------~%")
   (loop for i from 0 to (1- (length *stack-area*)) do
-       (if (and (> i 5) (eq 0  (stack (1+ (* -2 (1+ i)))))) (return))
-       (format t "S ~A : ~A~%" (1+ (* -2 (1+ i))) (stack (1+ (* -2 (1+ i))))))
+       (if (and (> i 5) 
+	 (eq 0  (stack (1+ (* -2 (1+ i)))))) (return))
+       (format t "S ~A : ~A~%" (1+ (* -2 (1+ i)))
+	       (stack (1+ (* -2 (1+ i))))))
   (format t "--------------~%")
   (loop for i from 0 to (- (length *register-area*) 2) do
        (if (eq 0 (register (1+ i))) (return))
@@ -1940,12 +1984,13 @@ heap: -2,-4,-6,...
        (setf (store (trail i)) (cons 'ref (trail i)))))
 
 (defun tidy-trail ()
+ (when (and *B* *TR* *HB* *H* (>= *B* 0) (>= *TR* 0))
   (let ((i (stack (addr+ *B* (stack *B*) 5))))
     (while (< i *TR*)
       (if (or (addr< (trail i) *HB*) (and (addr< *H* (trail i)) (addr< (trail i) *B*)))
 	  (incf i)
 	  (progn (setf (trail i) (trail (1- *TR*)))
-		 (decf *TR*))))))
+		 (decf *TR*)))))))
 
 (defun defined (pair)
   (cond ((gethash pair *dispatching-code-table*) 'user-defined)
@@ -1953,6 +1998,7 @@ heap: -2,-4,-6,...
 	(t nil)))
 
 (defun unify (a1 a2)
+  (declare (optimize (speed 3) (safety 0) (debug 0) (space 0)))
   (let ((pdl nil))
     (push a1 pdl) (push a2 pdl) (setq *fail* nil)
     (loop while (not (or (null pdl) *fail*)) do
@@ -2023,9 +2069,14 @@ heap: -2,-4,-6,...
 	  (cons k (to-lisp-object (stack (addr+ *E* (cdr v) 1)))) alist))) assign-table)
     alist))
 
+(defun setcons()
+  (setf (heap *H*) (cons 'con 0.2))
+  (setf *H* (addr+ *H* 1))
+  (setq *P* (cdr *P*)))
 
 (defun send-query (query-code)
-  (let ((*register-area* (make-array 10 :adjustable t))
+  (declare (optimize (speed 3) (safety 0) (debug 0) (space 0)))
+  (let ((*register-area* (make-array 10  :adjustable t))
 	(*heap-area* (make-array 30 :adjustable t))
 	(*stack-area* (make-array 50 :adjustable t))
 	(*trail-area* (make-array 20 :adjustable t))
@@ -2049,7 +2100,7 @@ heap: -2,-4,-6,...
     (setq *fail* nil)
     (loop
        (let ((inst (car *P*)))
-	 ;;(format t "next: ~A  *HB*=~A *B*=~A fail:~A~%" (car inst) *HB* *B* *fail*)
+	 ;;(format t "next: ~A  *HB*=~A *B*=~A fail:~A~%" inst *HB* *B* *fail*)
 	 (if (null inst)
 	     (return)
 	     (if (eq 'fail inst)
@@ -2144,6 +2195,7 @@ heap: -2,-4,-6,...
 			    (bind addr *H*)))
 		      (setf *H* (addr+ *H* 1))
 		      (setq *P* (cdr *P*))))
+		   (setcons (setcons))
 		   (set-constant (let ((c (cadr inst)))
 				   (setf (heap *H*) (cons 'con c))
 				   (setf *H* (addr+ *H* 1))
@@ -2464,14 +2516,16 @@ heap: -2,-4,-6,...
 		      (if result
 			  (setf *P* result)
 			  (backtrack))))
-		   (neck-cut (when (addr< *B0* *B*)
+		   (neck-cut (when (and *B0* *B* (addr< *B0* *B*))
 			       (setq *B* *B0*)
 			       (tidy-trail))
 			     (setq *P* (cdr *P*))) 
 		   (get-level (let ((y (cadr inst)))
-				(setf (stack (addr+ *E* 2 y)) *B0*)))
-		   (cut (let ((y (cadr inst)))
-			  (when (addr< (stack (addr+ *E* 2 y)) *B*)
+				(setf (stack (addr+ *E* 2 y)) *B0*))
+			      (setq *P* (cdr *P*)))
+		   (cut (let ( (y (cadr inst)) )
+			  (when (and *B* *E* (>= *B* 0) (>= *E* 0) 
+				     (addr< (stack (addr+ *E* 2 y)) *B*))
 			    (setf *B* (stack (addr+ *E* 2 y)))
 			    (tidy-trail))
 			  (setq *P* (cdr *P*))))
@@ -2716,6 +2770,21 @@ heap: -2,-4,-6,...
 	   (|**| (expt (prolog-calc-expr (third expr))
 		       (prolog-calc-expr (fourth expr))))))))
 
+(define-prolog-builtin "cputime" (var)
+   (let ((eval-result (get-internal-run-time)))
+     (unify-ao 1 eval-result)
+     (prolog-success)))
+
+(define-prolog-builtin "lisp" (var sexpr)
+     (unify-ao 1 (eval (to-lisp-object sexpr)))
+     (prolog-backtrack-or-continue))
+
+(define-prolog-builtin "plus" (var x y)
+   (unify-ao 1 (+ (to-lisp-object x) (to-lisp-object y))))
+
+(define-prolog-builtin "minus" (var x y)
+   (unify-ao 1 (- (to-lisp-object x) (to-lisp-object y)) ))
+	       
 (define-prolog-builtin "is" (var expr)
   (prolog-assert "is" 2 "instantiation error"
 		 (not (prolog-contain-unbound-p (to-lisp-object expr))))
@@ -2733,10 +2802,16 @@ heap: -2,-4,-6,...
 	(prolog-success)
 	(prolog-fail))))
 
+(define-prolog-builtin "le" (a b)
+     (if (not (> (to-lisp-object a) (to-lisp-object b)))
+        (prolog-fail)
+	(prolog-success)) )
+
 (define-prolog-builtin "<" (a b)
+ 
   (prolog-assert "<" 2 "instantiation error"
 		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
-			  (prolog-contain-unbound-p (to-lisp-object b)))))
+			  (prolog-contain-unbound-p (to-lisp-object b))))) 
   (let ((result-a (prolog-calc-expr (to-lisp-object a)))
 	(result-b (prolog-calc-expr (to-lisp-object b))))
     (if (< result-a result-b)
