@@ -2524,7 +2524,7 @@ heap: -2,-4,-6,...
 				(setf (stack (addr+ *E* 2 y)) *B0*))
 			      (setq *P* (cdr *P*)))
 		   (cut (let ( (y (cadr inst)) )
-			  (when (and *B* *E* (>= *B* 0) (>= *E* 0) 
+			  (when (and *B* *E* 
 				     (addr< (stack (addr+ *E* 2 y)) *B*))
 			    (setf *B* (stack (addr+ *E* 2 y)))
 			    (tidy-trail))
