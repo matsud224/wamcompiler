@@ -17,7 +17,7 @@
 
 (defvar *operator-list* nil)
 (defvar *predicate-type-table* (make-hash-table :test #'equal)) ;;user-defined or builtin
-(defvar *clause-code-table* (make-hash-table :test #'equal)) ;; key (functor . arity). 
+(defvar *clause-code-table* (make-hash-table :test #'equal)) ;; key (functor . arity).
 (defvar *dispatching-code-table* (make-hash-table :test #'equal))
 (defvar *builtin-predicate-table* (make-hash-table :test #'equal))
 
@@ -464,7 +464,7 @@
   (let ((head-arity (arity head))
 	(body1-arity (arity (car body))))
     (cons (max head-arity body1-arity)
-	  (mapcar (lambda (term) (arity term)) (cdr body)))))		  
+	  (mapcar (lambda (term) (arity term)) (cdr body)))))
 
 (defun head-firstbody-conj (head body)
   (cond ((null head) (car body))
@@ -913,7 +913,7 @@
 		  (eq 'initialized (gethash (cadr inst) permanent-state-table))
 		  (eq body-num (gethash (cadr inst) permanent-lastgoal-table)))
 	     (setf (car inst) 'put-unsafe-value)
-	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap))    
+	     (setf (gethash (cadr inst) permanent-state-table) 'on-heap))
 	   (unless (have-key? (cadr inst) permanent-state-table)
 	     (setf (gethash (cadr inst) permanent-state-table) 'initialized)))
 	  (set-variable-temporary
@@ -1058,8 +1058,8 @@
 			(t inst)))
 		    code))))
 
-;;*-variable命令の内、*-value命令に置換すべき箇所を置換
-;;compile-clauseの直後に呼ばれることを仮定（レジスタが被らない）
+;; Replace *-variable instructions to *-value instructions if needed.
+;; It is supposed that this is called right after compile-clause.
 (defun classify-variable-value (code)
   (let ((temporary-initialized-vars nil)
 	(permanent-initialized-vars nil)
@@ -1089,9 +1089,9 @@
 	     (setf (car inst) (cdr (assoc (car inst) var-val-table)))
 	     (pushnew (second inst) permanent-initialized-vars))))))
   code)
-	   
 
-    
+
+
 
 (defun optimize-test (&optional (query-mode nil))
   (let ((clause (parse *standard-input*)))
@@ -1394,7 +1394,7 @@
 			  (cond
 			    ((cut-operator-p b)
 			     (append
-			      (if  (= body-num 0) 
+			      (if  (= body-num 0)
 				  (list (list 'neck-cut))
 				  `((cut ,(cddr (assoc '|!| assign-table)))))
 			      deallocate-part))
@@ -1554,7 +1554,7 @@
 				   (append-hash
 				    (cons (car arg-1) (arity arg-1))
 				    new-label struct-label-table)))
-				`(label ,new-label))	    
+				`(label ,new-label))
 			      (copy-tree (cdr s)))))) subseq))
 	     (indexing-code
 	      (compile-indexing-code
@@ -1593,7 +1593,7 @@
 		  (lambda (k v)
 		    (setf (gethash k new-table) (gethash v label-ptr-table)))
 		  (second inst))
-		 (nconc inst (list new-table)))) 
+		 (nconc inst (list new-table))))
 	      (switch-on-structure
 	       (let ((new-table (make-hash-table :test #'equal)))
 		 (maphash
@@ -1771,7 +1771,7 @@
 	       (multiple-value-bind (head body clause-type) (divide-head-body clause)
 		 (case clause-type
 		   ((fact rule)
-		    (let ((wamcode (compile-and-optimize clause head body))) 
+		    (let ((wamcode (compile-and-optimize clause head body)))
 		      (let ((key (cons (car head) (arity head))))
 			(if (eq (gethash key *predicate-type-table*) 'builtin)
 			    (format *query-io*
@@ -1793,7 +1793,7 @@
 		      (send-query wamcode)))
 		   (call
 		    (let ((wamcode (call-n-copy-to-next-instraction
-				    (compile-and-optimize clause head body)))) 
+				    (compile-and-optimize clause head body))))
 		      (send-query wamcode))))))))))))
 
 
@@ -1825,7 +1825,7 @@ heap: -2,-4,-6,...
 
 
 (defun register (num)
-  (aref *register-area* num))	
+  (aref *register-area* num))
 
 (defun (setf register) (new-val num)
   ;;(format t "register ~A = ~A~%" num new-val)
@@ -1865,7 +1865,7 @@ heap: -2,-4,-6,...
       (adjust-array *stack-area* (* 2 real-addr)))
     (setf (aref *stack-area* real-addr) new-val)))
 
-(defconstant bottom-of-stack -3) ;;-1はEの初期値としてつかう（初期状態でB>Eにしたいため）
+(defconstant bottom-of-stack -3) ;; -1 is treated as an initial value of E (B>E in initial state)
 (defconstant bottom-of-heap -2)
 (defconstant initial-value-of-E -1)
 
@@ -1878,8 +1878,8 @@ heap: -2,-4,-6,...
 (deftype register-number ()
   '(and (integer 1 *)))
 
-;;第一引数はアドレス(stack or heap)
-;;残りの引数は加算する定数
+;; the argument 1 is an address of stack or heap
+;; the rest of arguments are constants to add.
 (declaim (ftype (function (fixnum &rest fixnum) t) addr+))
 (defun addr+ (target &rest nums)
   (declare (optimize (speed 3) (space 0) (safety 0) (debug 0)))
@@ -1917,7 +1917,7 @@ heap: -2,-4,-6,...
   (setf (aref *trail-area* addr) new-val))
 
 (defun stackvar (y)
-  (stack (addr+ *E* y 1)))	
+  (stack (addr+ *E* y 1)))
 
 (defun (setf stackvar) (new-val y)
   (setf (stack (addr+ *E* y 1)) new-val))
@@ -1928,7 +1928,7 @@ heap: -2,-4,-6,...
        (format t "H ~A : ~A~%" (* -2 (1+ i)) (heap (* -2 (1+ i)))))
   (format t "--------------~%")
   (loop for i from 0 to (1- (length *stack-area*)) do
-       (if (and (> i 5) 
+       (if (and (> i 5)
 	 (eq 0  (stack (1+ (* -2 (1+ i)))))) (return))
        (format t "S ~A : ~A~%" (1+ (* -2 (1+ i)))
 	       (stack (1+ (* -2 (1+ i))))))
@@ -2086,7 +2086,7 @@ heap: -2,-4,-6,...
     (setq *H* bottom-of-heap)
     (setq *HB* bottom-of-heap)
     (setq *TR* 0)
-    ;;ダミーのチョイスポイントフレームを作る
+    ;; make a dummy choice point frame
     (setq *B* bottom-of-stack)
     (setf (stack *B*) 0)
     (setf (stack (addr+ *B* 1)) nil)
@@ -2171,7 +2171,7 @@ heap: -2,-4,-6,...
 					  (setf *H* (addr+ *H* 1))
 					  (setq *P* (cdr *P*))))
 		   (set-local-value-temporary
-		    (if (eq (store (cadr inst)) 'ref) 
+		    (if (eq (store (cadr inst)) 'ref)
 			(let* ((x (cadr inst))
 			       (addr (dereference x)))
 			  (if (addr< addr *H*)
@@ -2400,8 +2400,8 @@ heap: -2,-4,-6,...
 		    (setf *P* *CP*))
 		   (try-me-else
 		    (let* ((l (third inst))
-			   ;;(second inst)にはラベルのシンボルが入ってる（表示用）
-			   ;;(third inst)に、ラベルの次の命令へのポインタが入ってる
+			   ;; (second inst) : the symbol of the label (for print)
+			   ;; (third inst)  : the pointer to the next instruction
 			   (new-B
 			    (if (addr< *B* *E*)
 				(addr+ *E* (car (last (car *CP*))) 2)
@@ -2519,12 +2519,12 @@ heap: -2,-4,-6,...
 		   (neck-cut (when (and *B0* *B* (addr< *B0* *B*))
 			       (setq *B* *B0*)
 			       (tidy-trail))
-			     (setq *P* (cdr *P*))) 
+			     (setq *P* (cdr *P*)))
 		   (get-level (let ((y (cadr inst)))
 				(setf (stack (addr+ *E* 2 y)) *B0*))
 			      (setq *P* (cdr *P*)))
 		   (cut (let ( (y (cadr inst)) )
-			  (when (and *B* *E* 
+			  (when (and *B* *E*
 				     (addr< (stack (addr+ *E* 2 y)) *B*))
 			    (setf *B* (stack (addr+ *E* 2 y)))
 			    (tidy-trail))
@@ -2560,7 +2560,7 @@ heap: -2,-4,-6,...
 (defun prolog-structure-arity (obj)
   (length (cddr obj)))
 
-;;空リストはダメ
+;; empty list is not allowed.
 (defun wam-place-compound-on-heap (compound)
   (labels ((push-heap (v)
 	     ;;(format t "push-heap ~A(~A)~%" v *H*)
@@ -2661,12 +2661,10 @@ heap: -2,-4,-6,...
   `(error (make-condition 'prolog-builtin-predicate-error
 			  :predicate ',(cons (intern functor) arity) :cause ,cause)))
 
-;;成立しなければfail
 (defmacro prolog-assert (functor arity cause expr)
   `(unless ,expr
      (prolog-error ,functor ,arity ,cause)))
 
-;;何もせず関数を抜けようとするときはsuccessとなる
 (defmacro define-prolog-builtin (name arg-list &body body)
   (let ((flag (gensym)) (exit (gensym)))
     `(progn
@@ -2784,7 +2782,7 @@ heap: -2,-4,-6,...
 
 (define-prolog-builtin "minus" (var x y)
    (unify-ao 1 (- (to-lisp-object x) (to-lisp-object y)) ))
-	       
+
 (define-prolog-builtin "is" (var expr)
   (prolog-assert "is" 2 "instantiation error"
 		 (not (prolog-contain-unbound-p (to-lisp-object expr))))
@@ -2808,10 +2806,10 @@ heap: -2,-4,-6,...
 	(prolog-success)) )
 
 (define-prolog-builtin "<" (a b)
- 
+
   (prolog-assert "<" 2 "instantiation error"
 		 (not (or (prolog-contain-unbound-p (to-lisp-object a))
-			  (prolog-contain-unbound-p (to-lisp-object b))))) 
+			  (prolog-contain-unbound-p (to-lisp-object b)))))
   (let ((result-a (prolog-calc-expr (to-lisp-object a)))
 	(result-b (prolog-calc-expr (to-lisp-object b))))
     (if (< result-a result-b)
@@ -2939,7 +2937,7 @@ heap: -2,-4,-6,...
 (defmethod put-result ((c collector))
   (unify-oo (result c) (reverse (items c)))
   (setq *P* (cdr *P*)))
-	  
+
 (define-prolog-builtin "findall" (template pred result)
   (prolog-assert "findall" 3 "instantiation error"
 		 (not (wamvalue-unbound-p pred)))
@@ -2962,7 +2960,7 @@ heap: -2,-4,-6,...
 		     (proceed))))
     (setf (caddar wam-code) (nthcdr 7 wam-code))
     (setf *P* wam-code)))
-	  
+
 (define-prolog-builtin "consult" (file)
   (prolog-assert "consult" 1 "instantiation error"
 		 (not (wamvalue-unbound-p file)))
