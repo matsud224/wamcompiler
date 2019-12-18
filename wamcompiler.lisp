@@ -2521,12 +2521,12 @@ heap: -2,-4,-6,...
 			       (tidy-trail))
 			     (setq *P* (cdr *P*)))
 		   (get-level (let ((y (cadr inst)))
-				(setf (stack (addr+ *E* 2 y)) *B0*))
+				(setf (stack (addr+ *E* 1 y)) *B0*))
 			      (setq *P* (cdr *P*)))
 		   (cut (let ( (y (cadr inst)) )
 			  (when (and *B* *E*
-				     (addr< (stack (addr+ *E* 2 y)) *B*))
-			    (setf *B* (stack (addr+ *E* 2 y)))
+				     (addr< (stack (addr+ *E* 1 y)) *B*))
+			    (setf *B* (stack (addr+ *E* 1 y)))
 			    (tidy-trail))
 			  (setq *P* (cdr *P*))))
 		   (label
