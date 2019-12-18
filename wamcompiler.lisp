@@ -2926,6 +2926,10 @@ heap: -2,-4,-6,...
    (predicate :accessor predicate
 	      :initarg :predicate)))
 
+(defgeneric collect (collector))
+(defgeneric prepare (collector))
+(defgeneric put-result (collector))
+
 (defmethod collect ((c collector))
   (push (to-lisp-object (template c)) (items c))
   (setq *P* (cdr *P*)))
