@@ -1959,7 +1959,7 @@ heap: -2,-4,-6,...
 	a)))
 
 (defun backtrack ()
-  (if (eq *B* bottom-of-stack)
+  (if (or (null *B*) (eq *B* bottom-of-stack))
       (signal (make-condition 'prolog-query-failed))
       (progn (setq *fail* nil)
 	     (setf *B0* (stack (addr+ *B* (stack *B*) 7)))
@@ -1974,7 +1974,7 @@ heap: -2,-4,-6,...
 	       (set-to-trail a2)))))
 
 (defun set-to-trail (a)
-  (when (or (addr< a *HB*) (and (addr< *H* a) (addr< a *B*)))
+  (when (or (addr< a *HB*) (and (addr< *H* a) (and *B* (addr< a *B*))))
     (setf (trail *TR*) a)
     (incf *TR*)))
 
@@ -2111,7 +2111,7 @@ heap: -2,-4,-6,...
 			(signal (make-condition
 				 'prolog-found-solution
 				 :vars (make-solution-result (second inst))
-				 :can-backtrack? (/= *B* bottom-of-stack)))
+				 :can-backtrack? (and *B* (/= *B* bottom-of-stack))))
 		      (next-solution ()
 			(backtrack))))
 		   (put-variable-temporary (let ((x (cadr inst)) (a (caddr inst)))
